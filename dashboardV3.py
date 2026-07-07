@@ -475,6 +475,7 @@ class LidarDashboardApp:
       self.packet_queue.put(("RAW_LOG", f"ERROR: {str(e)}"))
 
   # Main data consumer engine
+  # Main data consumer engine
   def _ui_consumer_tick(self):
     latest_mqtt = None
     latest_pc = None
@@ -556,19 +557,22 @@ class LidarDashboardApp:
             self.log_message(self.raw_log, summary)
 
     # --- PROCESS MQTT JSON OBJECTS ---
-    # We now process MQTT immediately, regardless of clock calibration
     if latest_mqtt:
       _, wire_arrival_time, payload = latest_mqtt
       now = time.time()
 
-      raw_ts = payload.get("timestamp") or payload.get("time") or 0.0
+      # 1. Safely extract timestamp (protecting against List vs Dict crashes)
+      raw_ts = 0.0
+      if isinstance(payload, dict):
+          raw_ts = payload.get("timestamp") or payload.get("time") or 0.0
+          
       try:
         val = float(raw_ts)
         sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
       except (ValueError, TypeError):
         sensor_epoch = 0.0
 
-      # Apply clock offset if it's ready, otherwise display a placeholder
+      # Apply clock offset if it's ready
       if sensor_epoch > 0 and self.clock_offset is not None:
         norm_sensor = sensor_epoch + self.clock_offset
         edge_lat_ms = max(0.01, (wire_arrival_time - norm_sensor) * 1000)
@@ -578,30 +582,36 @@ class LidarDashboardApp:
 
       incoming_intrusions = []
 
-      # Safely drill down through Blickfeld's double-nested JSON schema
-      raw_objs = payload.get("objects", payload.get("intruders", {}))
-      obj_map = (
-          raw_objs.get("objects", {})
-          if isinstance(raw_objs, dict) and "objects" in raw_objs
-          else raw_objs
-      )
-
-      if isinstance(obj_map, dict):
-        obj_list = obj_map.values()
-      elif isinstance(obj_map, list):
-        obj_list = obj_map
+      # 2. Flatten the payload into a standard list of objects
+      if isinstance(payload, list):
+          obj_list = payload
       else:
-        obj_list = [payload]
+          raw_objs = payload.get("objects", payload.get("intruders", payload))
+          if isinstance(raw_objs, dict) and "objects" in raw_objs:
+              raw_objs = raw_objs["objects"]
+              
+          if isinstance(raw_objs, dict):
+              obj_list = list(raw_objs.values())
+          elif isinstance(raw_objs, list):
+              obj_list = raw_objs
+          else:
+              obj_list = [payload]
 
+      # 3. Process each object
       for obj in obj_list:
         if not isinstance(obj, dict):
           continue
 
-        if (
-            obj.get("intruding", {}).get("value") is True
-            or obj.get("is_intruding") is True
-            or payload.get("intruding") is True
-        ):
+        # If the WebGUI Zone node published it, we assume it's an intruder 
+        # unless it explicitly has an "intruding: false" flag.
+        intruding_data = obj.get("intruding", True)
+        is_intruder = True
+        if isinstance(intruding_data, dict):
+            is_intruder = intruding_data.get("value", True)
+        elif isinstance(intruding_data, bool):
+            is_intruder = intruding_data
+
+        if is_intruder:
           c_id = obj.get("id", obj.get("cluster_id", "Unknown"))
           
           props = obj.get("properties", {}) or obj.get("classification", {})
@@ -626,6 +636,7 @@ class LidarDashboardApp:
               "speed_mph": round(speed_mph, 1),
           })
 
+      # 4. Trigger UI Updates
       if len(incoming_intrusions) > 0:
         self.alarm_active_until = now + ALARM_HOLD_SECONDS
         self.cached_subjects = incoming_intrusions
