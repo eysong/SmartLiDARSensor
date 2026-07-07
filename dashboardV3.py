@@ -502,7 +502,7 @@ class LidarDashboardApp:
           float(raw_ts) / 1e9 if float(raw_ts) > 1e16 else float(raw_ts)
       )
 
-      # TRUE WIRE-SPEED CALIBRATION
+      # TRUE WIRE-SPEED CALIBRATION (No longer blocking!)
       if self.clock_offset is None:
         if pc_sensor_epoch > 0:
           self.calib_deltas.append(pc_wire_time - pc_sensor_epoch)
@@ -516,8 +516,6 @@ class LidarDashboardApp:
               self.raw_log,
               "CALIBRATION COMPLETE: Ready to run network benchmarks.",
           )
-        self.root.after(100, self._ui_consumer_tick)
-        return
 
       # TIMED BENCHMARK LOGIC
       if self.bench_active and self.clock_offset is not None:
@@ -557,11 +555,20 @@ class LidarDashboardApp:
             self.log_message(self.raw_log, summary)
 
     # --- PROCESS MQTT JSON OBJECTS ---
+    now = time.time()
+    lat_str = "CALIBRATING CLOCK..."
+
     if latest_mqtt:
       _, wire_arrival_time, payload = latest_mqtt
-      now = time.time()
+      
+      # Terminal Debugging: Prints payload structure when it hits the dashboard
+      print(f"\n[DEBUG] Received MQTT Payload Type: {type(payload)}")
+      if isinstance(payload, dict):
+          print(f"[DEBUG] Top-Level Keys: {list(payload.keys())}")
+      elif isinstance(payload, list) and len(payload) > 0:
+          print(f"[DEBUG] Array item sample keys: {list(payload[0].keys()) if isinstance(payload[0], dict) else type(payload[0])}")
 
-      # 1. Safely extract timestamp (protecting against List vs Dict crashes)
+      # Extract timestamp safely
       raw_ts = 0.0
       if isinstance(payload, dict):
           raw_ts = payload.get("timestamp") or payload.get("time") or 0.0
@@ -572,17 +579,14 @@ class LidarDashboardApp:
       except (ValueError, TypeError):
         sensor_epoch = 0.0
 
-      # Apply clock offset if it's ready
       if sensor_epoch > 0 and self.clock_offset is not None:
         norm_sensor = sensor_epoch + self.clock_offset
         edge_lat_ms = max(0.01, (wire_arrival_time - norm_sensor) * 1000)
         lat_str = f"{edge_lat_ms:.2f}ms"
-      else:
-        lat_str = "CALIBRATING CLOCK..."
 
       incoming_intrusions = []
 
-      # 2. Flatten the payload into a standard list of objects
+      # Flatten payload array or dictionaries 
       if isinstance(payload, list):
           obj_list = payload
       else:
@@ -597,13 +601,11 @@ class LidarDashboardApp:
           else:
               obj_list = [payload]
 
-      # 3. Process each object
+      # Parse individual tracked entities
       for obj in obj_list:
         if not isinstance(obj, dict):
           continue
 
-        # If the WebGUI Zone node published it, we assume it's an intruder 
-        # unless it explicitly has an "intruding: false" flag.
         intruding_data = obj.get("intruding", True)
         is_intruder = True
         if isinstance(intruding_data, dict):
@@ -636,27 +638,23 @@ class LidarDashboardApp:
               "speed_mph": round(speed_mph, 1),
           })
 
-      # 4. Trigger UI Updates
       if len(incoming_intrusions) > 0:
         self.alarm_active_until = now + ALARM_HOLD_SECONDS
         self.cached_subjects = incoming_intrusions
 
-      is_alarm = now < self.alarm_active_until
-      display_list = self.cached_subjects if is_alarm else []
+        if (now - self.last_log_time) >= COOLDOWN_SECONDS:
+          self.last_log_time = now
+          log_msg = f"INTRUSION | MQTT Edge Latency: {lat_str} | Active Subjects: {len(incoming_intrusions)}"
+          self.log_message(self.edge_log, log_msg)
 
-      if (now - self.last_ui_paint) >= UI_REFRESH_RATE_SEC:
-        self.last_ui_paint = now
-        self._update_smart_ui(is_alarm, display_list, self.cached_xyz)
+    # --- REFRESH UI CORE ENGINE ---
+    # Moved outside the "if latest_mqtt" scope so it updates on every tick
+    is_alarm = now < self.alarm_active_until
+    display_list = self.cached_subjects if is_alarm else []
 
-      if len(incoming_intrusions) > 0 and (
-          now - self.last_log_time
-      ) >= COOLDOWN_SECONDS:
-        self.last_log_time = now
-        log_msg = (
-            f"INTRUSION | MQTT Edge Latency: {lat_str} | Active"
-            f" Subjects: {len(incoming_intrusions)}"
-        )
-        self.log_message(self.edge_log, log_msg)
+    if (now - self.last_ui_paint) >= UI_REFRESH_RATE_SEC:
+      self.last_ui_paint = now
+      self._update_smart_ui(is_alarm, display_list, self.cached_xyz)
 
     self.root.after(100, self._ui_consumer_tick)
 
