@@ -27,7 +27,7 @@ API_KEY = "2ee812bc2e745dddb8i1cmJwrEaz8ehy"
 # MQTT Config
 MQTT_BROKER = "127.0.0.1"
 MQTT_PORT = 1883
-MQTT_TOPIC = "lidar/security/alerts"
+MQTT_TOPIC = "#"
 
 
 class LidarDashboardApp:
@@ -416,11 +416,14 @@ class LidarDashboardApp:
 
     def on_message(client, userdata, msg):
       try:
-        payload = json.loads(msg.payload.decode("utf-8"))
-        # pass the payload and the exact network arrival time to the UI thread
+        # Print the literal raw string as it arrives off the wire
+        raw_str = msg.payload.decode("utf-8")
+        print(f"\n[RAW MQTT] Topic: {msg.topic} | Payload: {raw_str[:200]}...")
+        
+        payload = json.loads(raw_str)
         self.packet_queue.put(("MQTT_OBJECTS", time.time(), payload))
-      except Exception:
-        pass
+      except Exception as e:
+        print(f"[!] MQTT PARSE ERROR on topic {msg.topic}: {e}")
 
     try:
       # paho MQTT v2 & v1 compatibility wrap
