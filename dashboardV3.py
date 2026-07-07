@@ -564,7 +564,7 @@ class LidarDashboardApp:
     if latest_mqtt:
       _, wire_arrival_time, payload = latest_mqtt
       
-      # 1. Safely extract Timestamp (Handling our custom ISO strings or raw floats)
+      # 1. Safely extract Timestamp
       raw_ts = payload.get("timestamp") or payload.get("time") or 0.0
       sensor_epoch = 0.0
       
@@ -581,11 +581,24 @@ class LidarDashboardApp:
           except (ValueError, TypeError):
               pass
 
-      # Apply clock offset if it's ready
-      if sensor_epoch > 0 and self.clock_offset is not None:
-        norm_sensor = sensor_epoch + self.clock_offset
-        edge_lat_ms = max(0.01, (wire_arrival_time - norm_sensor) * 1000)
-        lat_str = f"{edge_lat_ms:.2f}ms"
+      # ---------------------------------------------------------
+      # THE FIX: Smart Clock Routing
+      # ---------------------------------------------------------
+      if sensor_epoch > 0:
+        # Check if timestamp is already in laptop system time (within 24 hours of right now)
+        if abs(now - sensor_epoch) < 86400:
+            # It came from your Bridge Script! No offset needed.
+            edge_lat_ms = max(0.01, (wire_arrival_time - sensor_epoch) * 1000)
+            lat_str = f"{edge_lat_ms:.2f}ms"
+        elif self.clock_offset is not None:
+            # It came straight from the LiDAR hardware! Apply the calibration offset.
+            norm_sensor = sensor_epoch + self.clock_offset
+            edge_lat_ms = max(0.01, (wire_arrival_time - norm_sensor) * 1000)
+            lat_str = f"{edge_lat_ms:.2f}ms"
+        else:
+            lat_str = "CALIBRATING CLOCK..."
+      else:
+        lat_str = "UNKNOWN (No timestamp)"
 
       incoming_intrusions = []
 
