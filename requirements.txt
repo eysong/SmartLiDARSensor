@@ -1,0 +1,4 @@
+blickfeld-qb2
+matplotlib
+numpy
+paho-mqtt
