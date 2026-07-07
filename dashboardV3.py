@@ -564,24 +564,24 @@ class LidarDashboardApp:
     if latest_mqtt:
       _, wire_arrival_time, payload = latest_mqtt
       
-      # Terminal Debugging: Prints payload structure when it hits the dashboard
-      print(f"\n[DEBUG] Received MQTT Payload Type: {type(payload)}")
-      if isinstance(payload, dict):
-          print(f"[DEBUG] Top-Level Keys: {list(payload.keys())}")
-      elif isinstance(payload, list) and len(payload) > 0:
-          print(f"[DEBUG] Array item sample keys: {list(payload[0].keys()) if isinstance(payload[0], dict) else type(payload[0])}")
+      # 1. Safely extract Timestamp (Handling our custom ISO strings or raw floats)
+      raw_ts = payload.get("timestamp") or payload.get("time") or 0.0
+      sensor_epoch = 0.0
+      
+      if isinstance(raw_ts, str):
+          try:
+              # Convert ISO 8601 string back to a Unix float
+              sensor_epoch = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+          except Exception:
+              pass
+      else:
+          try:
+              val = float(raw_ts)
+              sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
+          except (ValueError, TypeError):
+              pass
 
-      # Extract timestamp safely
-      raw_ts = 0.0
-      if isinstance(payload, dict):
-          raw_ts = payload.get("timestamp") or payload.get("time") or 0.0
-          
-      try:
-        val = float(raw_ts)
-        sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
-      except (ValueError, TypeError):
-        sensor_epoch = 0.0
-
+      # Apply clock offset if it's ready
       if sensor_epoch > 0 and self.clock_offset is not None:
         norm_sensor = sensor_epoch + self.clock_offset
         edge_lat_ms = max(0.01, (wire_arrival_time - norm_sensor) * 1000)
@@ -589,58 +589,60 @@ class LidarDashboardApp:
 
       incoming_intrusions = []
 
-      # Flatten payload array or dictionaries 
-      if isinstance(payload, list):
-          obj_list = payload
+      # ---------------------------------------------------------
+      # THE FIX: Read the pre-processed custom payload directly!
+      # ---------------------------------------------------------
+      # (Added 'subejects' to catch any potential typos in the incoming stream)
+      custom_subjects = payload.get("subjects") or payload.get("subejects") or []
+      
+      if custom_subjects and isinstance(custom_subjects, list):
+          # The data is ALREADY processed by our bridge script! No math needed.
+          for subj in custom_subjects:
+              incoming_intrusions.append({
+                  "cluster_id": str(subj.get("cluster_id", "Unknown")),
+                  "classification": subj.get("classification", "UNCLASSIFIED_MOTION"),
+                  "speed_mph": float(subj.get("speed_mph", 0.0)),
+              })
       else:
+          # Fallback: Native Blickfeld Nested Parsing (just in case you switch back)
           raw_objs = payload.get("objects", payload.get("intruders", payload))
           if isinstance(raw_objs, dict) and "objects" in raw_objs:
               raw_objs = raw_objs["objects"]
               
-          if isinstance(raw_objs, dict):
-              obj_list = list(raw_objs.values())
-          elif isinstance(raw_objs, list):
-              obj_list = raw_objs
-          else:
-              obj_list = [payload]
+          obj_list = list(raw_objs.values()) if isinstance(raw_objs, dict) else (raw_objs if isinstance(raw_objs, list) else [payload])
 
-      # Parse individual tracked entities
-      for obj in obj_list:
-        if not isinstance(obj, dict):
-          continue
+          for obj in obj_list:
+            if not isinstance(obj, dict):
+              continue
 
-        intruding_data = obj.get("intruding", True)
-        is_intruder = True
-        if isinstance(intruding_data, dict):
-            is_intruder = intruding_data.get("value", True)
-        elif isinstance(intruding_data, bool):
-            is_intruder = intruding_data
+            intruding_data = obj.get("intruding", True)
+            is_intruder = intruding_data.get("value", True) if isinstance(intruding_data, dict) else (intruding_data if isinstance(intruding_data, bool) else True)
 
-        if is_intruder:
-          c_id = obj.get("id", obj.get("cluster_id", "Unknown"))
-          
-          props = obj.get("properties", {}) or obj.get("classification", {})
-          raw_size = str(props.get("size", obj.get("size", ""))).upper()
+            if is_intruder:
+              c_id = obj.get("id", obj.get("cluster_id", "Unknown"))
+              props = obj.get("properties", {}) or obj.get("classification", {})
+              raw_size = str(props.get("size", obj.get("size", ""))).upper()
+              
+              friendly_type = "UNCLASSIFIED_MOTION"
+              if "MEDIUM" in raw_size or "PERSON" in raw_size: friendly_type = "PERSON"
+              elif "LARGE" in raw_size or "VEHICLE" in raw_size: friendly_type = "VEHICLE"
+              elif "SMALL" in raw_size: friendly_type = "ANIMAL_OR_DEBRIS"
 
-          friendly_type = "UNCLASSIFIED_MOTION"
-          if "MEDIUM" in raw_size or "PERSON" in raw_size: friendly_type = "PERSON"
-          elif "LARGE" in raw_size or "VEHICLE" in raw_size: friendly_type = "VEHICLE"
-          elif "SMALL" in raw_size: friendly_type = "ANIMAL_OR_DEBRIS"
+              vel = obj.get("velocity", {})
+              if isinstance(vel, list) and len(vel) >= 3:
+                vx, vy, vz = vel[0], vel[1], vel[2]
+              else:
+                vx, vy, vz = vel.get("x", 0), vel.get("y", 0), vel.get("z", 0)
+                
+              speed_mph = math.sqrt(vx**2 + vy**2 + vz**2) * 2.23694
 
-          vel = obj.get("velocity", {})
-          if isinstance(vel, list) and len(vel) >= 3:
-            vx, vy, vz = vel[0], vel[1], vel[2]
-          else:
-            vx, vy, vz = vel.get("x", 0), vel.get("y", 0), vel.get("z", 0)
-            
-          speed_mph = math.sqrt(vx**2 + vy**2 + vz**2) * 2.23694
+              incoming_intrusions.append({
+                  "cluster_id": str(c_id),
+                  "classification": friendly_type,
+                  "speed_mph": round(speed_mph, 1),
+              })
 
-          incoming_intrusions.append({
-              "cluster_id": str(c_id),
-              "classification": friendly_type,
-              "speed_mph": round(speed_mph, 1),
-          })
-
+      # Trigger UI Updates
       if len(incoming_intrusions) > 0:
         self.alarm_active_until = now + ALARM_HOLD_SECONDS
         self.cached_subjects = incoming_intrusions
@@ -651,7 +653,6 @@ class LidarDashboardApp:
           self.log_message(self.edge_log, log_msg)
 
     # --- REFRESH UI CORE ENGINE ---
-    # Moved outside the "if latest_mqtt" scope so it updates on every tick
     is_alarm = now < self.alarm_active_until
     display_list = self.cached_subjects if is_alarm else []
 
