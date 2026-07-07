@@ -556,6 +556,100 @@ class LidarDashboardApp:
             self.log_message(self.raw_log, summary)
 
     # --- PROCESS MQTT JSON OBJECTS ---
+    # We now process MQTT immediately, regardless of clock calibration
+    if latest_mqtt:
+      _, wire_arrival_time, payload = latest_mqtt
+      now = time.time()
+
+      raw_ts = payload.get("timestamp") or payload.get("time") or 0.0
+      try:
+        val = float(raw_ts)
+        sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
+      except (ValueError, TypeError):
+        sensor_epoch = 0.0
+
+      # Apply clock offset if it's ready, otherwise display a placeholder
+      if sensor_epoch > 0 and self.clock_offset is not None:
+        norm_sensor = sensor_epoch + self.clock_offset
+        edge_lat_ms = max(0.01, (wire_arrival_time - norm_sensor) * 1000)
+        lat_str = f"{edge_lat_ms:.2f}ms"
+      else:
+        lat_str = "CALIBRATING CLOCK..."
+
+      incoming_intrusions = []
+
+      # Safely drill down through Blickfeld's double-nested JSON schema
+      raw_objs = payload.get("objects", payload.get("intruders", {}))
+      obj_map = (
+          raw_objs.get("objects", {})
+          if isinstance(raw_objs, dict) and "objects" in raw_objs
+          else raw_objs
+      )
+
+      if isinstance(obj_map, dict):
+        obj_list = obj_map.values()
+      elif isinstance(obj_map, list):
+        obj_list = obj_map
+      else:
+        obj_list = [payload]
+
+      for obj in obj_list:
+        if not isinstance(obj, dict):
+          continue
+
+        if (
+            obj.get("intruding", {}).get("value") is True
+            or obj.get("is_intruding") is True
+            or payload.get("intruding") is True
+        ):
+          c_id = obj.get("id", obj.get("cluster_id", "Unknown"))
+          
+          props = obj.get("properties", {}) or obj.get("classification", {})
+          raw_size = str(props.get("size", obj.get("size", ""))).upper()
+
+          friendly_type = "UNCLASSIFIED_MOTION"
+          if "MEDIUM" in raw_size or "PERSON" in raw_size: friendly_type = "PERSON"
+          elif "LARGE" in raw_size or "VEHICLE" in raw_size: friendly_type = "VEHICLE"
+          elif "SMALL" in raw_size: friendly_type = "ANIMAL_OR_DEBRIS"
+
+          vel = obj.get("velocity", {})
+          if isinstance(vel, list) and len(vel) >= 3:
+            vx, vy, vz = vel[0], vel[1], vel[2]
+          else:
+            vx, vy, vz = vel.get("x", 0), vel.get("y", 0), vel.get("z", 0)
+            
+          speed_mph = math.sqrt(vx**2 + vy**2 + vz**2) * 2.23694
+
+          incoming_intrusions.append({
+              "cluster_id": str(c_id),
+              "classification": friendly_type,
+              "speed_mph": round(speed_mph, 1),
+          })
+
+      if len(incoming_intrusions) > 0:
+        self.alarm_active_until = now + ALARM_HOLD_SECONDS
+        self.cached_subjects = incoming_intrusions
+
+      is_alarm = now < self.alarm_active_until
+      display_list = self.cached_subjects if is_alarm else []
+
+      if (now - self.last_ui_paint) >= UI_REFRESH_RATE_SEC:
+        self.last_ui_paint = now
+        self._update_smart_ui(is_alarm, display_list, self.cached_xyz)
+
+      if len(incoming_intrusions) > 0 and (
+          now - self.last_log_time
+      ) >= COOLDOWN_SECONDS:
+        self.last_log_time = now
+        log_msg = (
+            f"INTRUSION | MQTT Edge Latency: {lat_str} | Active"
+            f" Subjects: {len(incoming_intrusions)}"
+        )
+        self.log_message(self.edge_log, log_msg)
+
+    self.root.after(100, self._ui_consumer_tick)
+
+    # --- PROCESS MQTT JSON OBJECTS ---
     # because MQTT doesn't have a rigid protobuf schema, we use a flexible parser 
     # to find any trackable objects output by the Blickfeld WebGUI Zone node.
     if latest_mqtt and self.clock_offset is not None:
