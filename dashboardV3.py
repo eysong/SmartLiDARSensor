@@ -605,8 +605,8 @@ class LidarDashboardApp:
       # ---------------------------------------------------------
       # THE FIX: Read the pre-processed custom payload directly!
       # ---------------------------------------------------------
-      # (Added 'subejects' to catch any potential typos in the incoming stream)
-      custom_subjects = payload.get("subjects") or payload.get("subejects") or []
+      # (Added 'subjects' to catch any potential typos in the incoming stream)
+      custom_subjects = payload.get("subjects") or payload.get("subjects") or []
       
       if custom_subjects and isinstance(custom_subjects, list):
           # The data is ALREADY processed by our bridge script! No math needed.
