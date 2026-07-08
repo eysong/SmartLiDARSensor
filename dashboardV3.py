@@ -587,14 +587,14 @@ class LidarDashboardApp:
       if sensor_epoch > 0:
         # Check if timestamp is already in laptop system time (within 24 hours of right now)
         if abs(now - sensor_epoch) < 86400:
-            # It came from your Bridge Script! No offset needed.
-            edge_lat_ms = max(0.01, (wire_arrival_time - sensor_epoch) * 1000)
-            lat_str = f"{edge_lat_ms:.2f}ms"
+            # It came from your Bridge Script! (Local machine transit)
+            edge_lat_ms = abs(wire_arrival_time - sensor_epoch) * 1000
+            lat_str = f"{edge_lat_ms:.3f}ms (Local)"
         elif self.clock_offset is not None:
-            # It came straight from the LiDAR hardware! Apply the calibration offset.
+            # It came straight from the LiDAR hardware! (Ethernet transit)
             norm_sensor = sensor_epoch + self.clock_offset
-            edge_lat_ms = max(0.01, (wire_arrival_time - norm_sensor) * 1000)
-            lat_str = f"{edge_lat_ms:.2f}ms"
+            edge_lat_ms = max(0.0, (wire_arrival_time - norm_sensor) * 1000)
+            lat_str = f"{edge_lat_ms:.2f}ms (Network)"
         else:
             lat_str = "CALIBRATING CLOCK..."
       else:
