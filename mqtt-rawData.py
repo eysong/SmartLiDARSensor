@@ -80,8 +80,9 @@ class MqttRawDashboardApp:
                 t_recv = time.time()
                 payload = json.loads(msg.payload.decode("utf-8"))
                 self.packet_queue.put(("PC_DATA", t_recv, payload))
-            except Exception:
-                pass
+            except Exception as e:
+                # WE ADDED THIS PRINT STATEMENT
+                print(f"⚠️ PYTHON PARSE ERROR: {e}")
 
         try:
             try:
