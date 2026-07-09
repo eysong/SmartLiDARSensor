@@ -120,9 +120,28 @@ class MqttRawDashboardApp:
             zs = payload.get("z", [])
             self.cached_xyz = (xs, ys, zs)
 
+            # --- WITH THIS NEW SAFE VERSION ---
             raw_ts = payload.get("timestamp", 0.0)
-            if raw_ts > 0:
-                sensor_epoch = float(raw_ts) / 1e9 if float(raw_ts) > 1e16 else float(raw_ts)
+            sensor_epoch = 0.0
+            
+            if isinstance(raw_ts, str):
+                try:
+                    # Handle both ISO strings and stringified numbers
+                    if "T" in raw_ts:
+                        sensor_epoch = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+                    else:
+                        val = float(raw_ts)
+                        sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
+                except Exception:
+                    pass
+            else:
+                try:
+                    val = float(raw_ts)
+                    sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
+                except (ValueError, TypeError):
+                    pass
+
+            if sensor_epoch > 0:
                 transit_ms = abs(recv_time - sensor_epoch) * 1000
                 if transit_ms > 100:
                     self.log_message(f"🛑 CRITICAL DELAY: Payload transit bottleneck: {transit_ms:.1f}ms")
