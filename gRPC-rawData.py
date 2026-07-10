@@ -24,8 +24,6 @@ class GrpcBenchmarkApp:
         self.root.configure(bg="#1e1e2e")
 
         self.packet_queue = queue.Queue()
-        self.calib_deltas = []
-        self.clock_offset = None
         self.bench_active = False
         self.bench_end_time = 0
         self.bench_latencies = []
@@ -86,9 +84,7 @@ class GrpcBenchmarkApp:
         self.raw_log.configure(state="disabled")
 
     def _start_timed_benchmark(self):
-        if self.bench_active or self.clock_offset is None:
-            if self.clock_offset is None:
-                self.log_message("ERROR: Still calibrating clock. Please wait.")
+        if self.bench_active:
             return
         try:
             dur = float(self.dur_entry.get())
@@ -142,20 +138,14 @@ class GrpcBenchmarkApp:
             raw_ts = getattr(pc_frame, "timestamp", None) or 0.0
             pc_sensor_epoch = float(raw_ts) / 1e9 if float(raw_ts) > 1e16 else float(raw_ts)
 
-            # Wire-Speed Clock Calibration
-            if self.clock_offset is None and pc_sensor_epoch > 0:
-                self.calib_deltas.append(pc_wire_time - pc_sensor_epoch)
-                if len(self.calib_deltas) >= 30:
-                    self.clock_offset = min(self.calib_deltas) - 0.003
-                    self.log_message("CALIBRATION COMPLETE: Hardware clock locked.")
-                    self.bench_status.configure(text="Status: Ready to run load test", fg="#a6e3a1")
-
             # Benchmarking Logic
-            if self.bench_active and self.clock_offset is not None:
+            # --- NTP-RELIANT BENCHMARKING LOGIC ---
+            if self.bench_active:
                 if time.time() <= self.bench_end_time:
                     if pc_sensor_epoch > 0:
-                        norm_ts = pc_sensor_epoch + self.clock_offset
-                        self.bench_latencies.append(max(0.01, (pc_wire_time - norm_ts) * 1000))
+                        # Absolute physical transit time using NTP sync
+                        raw_lat_ms = abs(pc_wire_time - pc_sensor_epoch) * 1000
+                        self.bench_latencies.append(raw_lat_ms)
                         self.bench_points_count.append(len(xs))
                 else:
                     self.bench_active = False
@@ -171,7 +161,7 @@ class GrpcBenchmarkApp:
                             f"====================================="
                         )
                         self.log_message(summary)
-
+                        
             # Plot Rendering
             if len(xs) > 0:
                 self.ax.clear()

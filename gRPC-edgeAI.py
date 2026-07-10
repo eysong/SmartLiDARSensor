@@ -31,9 +31,6 @@ class GrpcEdgeDashboardApp:
         self.alarm_active_until = 0
         self.last_ui_paint = 0
         self.cached_subjects = []
-        
-        self.calib_deltas = []
-        self.clock_offset = None
 
         self.root.rowconfigure(1, weight=1)
         self.root.rowconfigure(2, weight=1)
@@ -126,17 +123,12 @@ class GrpcEdgeDashboardApp:
             raw_ts = metadata.get("timestamp", 0.0)
             sensor_epoch = float(raw_ts) / 1e9 if float(raw_ts) > 1e16 else float(raw_ts)
 
-            if self.clock_offset is None and sensor_epoch > 0:
-                self.calib_deltas.append(wire_arrival_time - sensor_epoch)
-                if len(self.calib_deltas) >= 15:
-                    self.clock_offset = min(self.calib_deltas) - 0.002
-                    self.log_message("CLOCK SYNCED: Hardware baseline established.")
-
-            if sensor_epoch > 0 and self.clock_offset is not None:
-                edge_lat_ms = max(0.01, (wire_arrival_time - (sensor_epoch + self.clock_offset)) * 1000)
+            if sensor_epoch > 0:
+                # NTP handles the sync, so pure absolute difference is the physical network latency!
+                edge_lat_ms = abs(wire_arrival_time - sensor_epoch) * 1000
                 lat_str = f"{edge_lat_ms:.2f}ms"
             else:
-                lat_str = "CALIBRATING..."
+                lat_str = "UNKNOWN"
 
             obj_map = raw_objs.get("objects", {}) if isinstance(raw_objs, dict) and "objects" in raw_objs else raw_objs
             incoming_intrusions = []
