@@ -76,6 +76,10 @@ class GrpcEdgeDashboardApp:
         self.tree.column("speed", anchor="center", width=100)
         self.tree.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
+        tree_scroll = ttk.Scrollbar(subjects_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tree_scroll.set)
+        tree_scroll.grid(row=0, column=1, sticky="ns")
+
         # Telemetry Log
         perf_frame = tk.LabelFrame(self.root, text=" gRPC Edge-AI Performance Log ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
         perf_frame.grid(row=2, column=0, sticky="nsew", padx=15, pady=10)
