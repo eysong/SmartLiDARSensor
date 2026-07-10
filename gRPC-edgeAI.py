@@ -117,19 +117,42 @@ class GrpcEdgeDashboardApp:
         if latest_packet:
             _, wire_arrival_time, frame_data = latest_packet
             
-            # Extract hardware time for synchronization
-            raw_objs = frame_data.get("objects", {})
-            metadata = raw_objs.get("metadata", {}) if isinstance(raw_objs, dict) else {}
-            raw_ts = metadata.get("timestamp", 0.0)
-            sensor_epoch = float(raw_ts) / 1e9 if float(raw_ts) > 1e16 else float(raw_ts)
+            # 1. ROBUST TIMESTAMP EXTRACTION (Cascade through possible locations)
+            raw_ts = (
+                frame_data.get("timestamp") or
+                frame_data.get("frame", {}).get("timestamp") or
+                frame_data.get("objects", {}).get("timestamp") or
+                frame_data.get("objects", {}).get("metadata", {}).get("timestamp") or
+                0.0
+            )
 
+            # 2. STRING & NUMBER PARSER
+            sensor_epoch = 0.0
+            if isinstance(raw_ts, str):
+                try:
+                    if "T" in raw_ts:
+                        sensor_epoch = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+                    else:
+                        val = float(raw_ts)
+                        sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
+                except Exception:
+                    pass
+            else:
+                try:
+                    val = float(raw_ts)
+                    sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
+                except (ValueError, TypeError):
+                    pass
+
+            # 3. NTP-RELIANT LATENCY MATH
             if sensor_epoch > 0:
-                # NTP handles the sync, so pure absolute difference is the physical network latency!
                 edge_lat_ms = abs(wire_arrival_time - sensor_epoch) * 1000
                 lat_str = f"{edge_lat_ms:.2f}ms"
             else:
                 lat_str = "UNKNOWN"
-
+                
+            # (Keep the rest of your object parsing code below this...)
+            raw_objs = frame_data.get("objects", {})
             obj_map = raw_objs.get("objects", {}) if isinstance(raw_objs, dict) and "objects" in raw_objs else raw_objs
             incoming_intrusions = []
 
