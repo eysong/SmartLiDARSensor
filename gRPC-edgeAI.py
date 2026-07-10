@@ -163,10 +163,16 @@ class GrpcEdgeDashboardApp:
                     intruding = obj.get("intruding", {})
                     if intruding.get("value") is True or intruding.get("state") is True:
                         # 1. Extract pos (PositionOffsetXYZ)
-                        centroid = obj.get("center_of_mass", {})
-                        cx = round(centroid.get("x", 0.0), 2)
-                        cy = round(centroid.get("y", 0.0), 2)
-                        cz = round(centroid.get("z", 0.0), 2)
+                        pos_data = (
+                            obj.get("pose", {}).get("position") or
+                            obj.get("center_of_mass") or
+                            obj.get("kinematics", {}).get("position") or
+                            obj.get("bounding_box", {}).get("center") or
+                            {}
+                        )
+                        cx = round(pos_data.get("x", 0.0), 2)
+                        cy = round(pos_data.get("y", 0.0), 2)
+                        cz = round(pos_data.get("z", 0.0), 2)
 
                         # 2. Extract speed
                         vel = obj.get("velocity", {})
