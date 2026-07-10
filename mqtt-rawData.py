@@ -16,7 +16,7 @@ MQTT_BROKER = "127.0.0.1"
 MQTT_PORT = 1883
 MQTT_TOPIC = "blickfeld/raw_pointcloud"
 
-class MqttRawDashboardApp:
+class MqttRawBenchmarkApp:
     def __init__(self, root):
         self.root = root
         self.root.title("⚠️ WARNING: Raw Point Cloud via MQTT Benchmark")
@@ -26,6 +26,12 @@ class MqttRawDashboardApp:
         self.packet_queue = queue.Queue()
         self.cached_xyz = ([], [], [])
         self.last_ui_paint = 0
+
+        # Benchmark State Variables
+        self.bench_active = False
+        self.bench_end_time = 0
+        self.bench_latencies = []
+        self.bench_points_count = []
 
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=3)
@@ -48,22 +54,52 @@ class MqttRawDashboardApp:
         self.canvas = FigureCanvasTkAgg(self.fig, master=pc_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        bench_frame = tk.LabelFrame(self.root, text=" MQTT Buffer Load Diagnostics ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
+        bench_frame = tk.LabelFrame(self.root, text=" Network Benchmarker ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
         bench_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 15), pady=10)
-        bench_frame.rowconfigure(0, weight=1)
+        bench_frame.rowconfigure(2, weight=1)
         bench_frame.columnconfigure(0, weight=1)
 
+        # Control Bar
+        ctrl_bar = tk.Frame(bench_frame, bg="#252538", pady=10, padx=10)
+        ctrl_bar.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+
+        tk.Label(ctrl_bar, text="Duration (sec):", font=("Arial", 10, "bold"), bg="#252538", fg="white").pack(side=tk.LEFT, padx=5)
+        self.dur_entry = tk.Entry(ctrl_bar, width=6, font=("Consolas", 11, "bold"), bg="#181825", fg="#89b4fa", insertbackground="white")
+        self.dur_entry.insert(0, "10")
+        self.dur_entry.pack(side=tk.LEFT, padx=5)
+
+        self.start_btn = tk.Button(ctrl_bar, text="▶ START BENCHMARK", font=("Arial", 10, "bold"), bg="#89b4fa", fg="#11111b", command=self._start_timed_benchmark, relief="flat")
+        self.start_btn.pack(side=tk.RIGHT, padx=5)
+
+        self.bench_status = tk.Label(bench_frame, text="Status: Waiting for MQTT stream...", font=("Arial", 10, "italic"), bg="#1e1e2e", fg="#a6adc8")
+        self.bench_status.grid(row=1, column=0, sticky="w", padx=10, pady=2)
+
         self.log_widget = tk.Text(bench_frame, bg="#181825", fg="#f38ba8", font=("Consolas", 10), state="disabled", wrap="word")
-        self.log_widget.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        self.log_widget.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
         scroll = ttk.Scrollbar(bench_frame, orient="vertical", command=self.log_widget.yview)
         self.log_widget.configure(yscrollcommand=scroll.set)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll.grid(row=2, column=1, sticky="ns")
 
     def log_message(self, msg):
         self.log_widget.configure(state="normal")
         self.log_widget.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}\n")
         self.log_widget.see(tk.END)
         self.log_widget.configure(state="disabled")
+
+    def _start_timed_benchmark(self):
+        if self.bench_active:
+            return
+        try:
+            dur = float(self.dur_entry.get())
+        except ValueError:
+            return
+
+        self.bench_active = True
+        self.bench_end_time = time.time() + dur
+        self.bench_latencies, self.bench_points_count = [], []
+        self.start_btn.configure(state="disabled", text="⏳ RUNNING...", bg="#f38ba8")
+        self.bench_status.configure(text=f"Status: Recording packets for {dur}s...", fg="#f9e2af")
+        self.log_message(f"\n=== STARTING {dur}s MQTT NETWORK BENCHMARK ===")
 
     def _mqtt_subscriber_thread(self):
         def on_connect(client, userdata, flags, rc, properties=None):
@@ -134,13 +170,30 @@ class MqttRawDashboardApp:
                 except (ValueError, TypeError):
                     pass
 
-            if sensor_epoch > 0:
-                transit_ms = abs(recv_time - sensor_epoch) * 1000
-                if transit_ms > 100:
-                    sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
-                    recv_time_str = datetime.fromtimestamp(recv_time).strftime('%H:%M:%S.%f')[:-3]
-                    
-                    self.log_message(f"🛑 TIMING FAULT | measurementTime: {sensor_time_str} | Receipt Time: {recv_time_str} | Offset: {transit_ms:.1f}ms")
+            if self.bench_active:
+                if time.time() <= self.bench_end_time:
+                    if sensor_epoch > 0:
+                        transit_ms = abs(recv_time - sensor_epoch) * 1000
+                        self.bench_latencies.append(transit_ms)
+                        self.bench_points_count.append(len(xs))
+                else:
+                    self.bench_active = False
+                    self.start_btn.configure(state="normal", text="▶ START BENCHMARK", bg="#89b4fa")
+                    self.bench_status.configure(text="Status: Benchmark complete!", fg="#a6e3a1")
+
+                    if len(self.bench_latencies) > 0:
+                        first_sensor_time = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
+                        first_recv_time = datetime.fromtimestamp(recv_time).strftime('%H:%M:%S.%f')[:-3]
+                        
+                        summary = (
+                            f"\n=== SDSM SYNC RESULTS ({len(self.bench_latencies)} Frames) ===\n"
+                            f" ├── Stream Start: measurementTime @ {first_sensor_time} -> Receipt Time @ {first_recv_time}\n"
+                            f" ├── Avg Transit Delay : {sum(self.bench_latencies)/len(self.bench_latencies):.2f} ms\n"
+                            f" ├── Max Offset        : {max(self.bench_latencies):.2f} ms\n"
+                            f" └── pos (Points) Avg  : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} per frame\n"
+                            f"====================================="
+                        )
+                        self.log_message(summary)
 
             now = time.time()
             if (now - self.last_ui_paint) >= 0.4 and len(xs) > 0:
@@ -161,5 +214,5 @@ class MqttRawDashboardApp:
 
 if __name__ == "__main__":
     window = tk.Tk()
-    app = MqttRawDashboardApp(window)
+    app = MqttRawBenchmarkApp(window)
     window.mainloop()
