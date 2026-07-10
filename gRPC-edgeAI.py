@@ -184,7 +184,12 @@ class GrpcEdgeDashboardApp:
                 self.cached_subjects = incoming_intrusions
                 if (now - self.last_log_time) >= COOLDOWN_SECONDS:
                     self.last_log_time = now
-                    self.log_message(f"INTRUSION | gRPC Pipeline Latency: {lat_str} | Count: {len(incoming_intrusions)}")
+                    
+                    # Convert both epochs to human-readable format
+                    sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
+                    recv_time_str = datetime.fromtimestamp(wire_arrival_time).strftime('%H:%M:%S.%f')[:-3]
+                    
+                    self.log_message(f"INTRUSION | Sensor: {sensor_time_str} -> Laptop: {recv_time_str} | Latency: {lat_str}")
 
         # UI Drawing
         is_alarm = now < self.alarm_active_until

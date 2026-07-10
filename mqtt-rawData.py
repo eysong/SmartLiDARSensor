@@ -144,7 +144,10 @@ class MqttRawDashboardApp:
             if sensor_epoch > 0:
                 transit_ms = abs(recv_time - sensor_epoch) * 1000
                 if transit_ms > 100:
-                    self.log_message(f"🛑 CRITICAL DELAY: Payload transit bottleneck: {transit_ms:.1f}ms")
+                    sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
+                    recv_time_str = datetime.fromtimestamp(recv_time).strftime('%H:%M:%S.%f')[:-3]
+                    
+                    self.log_message(f"🛑 BOTTLENECK | Created: {sensor_time_str} | Received: {recv_time_str} | Latency: {transit_ms:.1f}ms")
 
             # Graph painting limit
             now = time.time()

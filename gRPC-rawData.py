@@ -153,15 +153,20 @@ class GrpcBenchmarkApp:
                     self.bench_status.configure(text="Status: Benchmark complete!", fg="#a6e3a1")
 
                     if len(self.bench_latencies) > 0:
+                        # Grab the first frame's times to show the start of the benchmark
+                        first_sensor_time = datetime.fromtimestamp(pc_sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
+                        first_recv_time = datetime.fromtimestamp(pc_wire_time).strftime('%H:%M:%S.%f')[:-3]
+                        
                         summary = (
                             f"\n=== RESULTS ({len(self.bench_latencies)} Frames) ===\n"
+                            f" ├── Stream Start: Sensor @ {first_sensor_time} -> Laptop @ {first_recv_time}\n"
                             f" ├── Avg Latency : {sum(self.bench_latencies)/len(self.bench_latencies):.2f} ms\n"
                             f" ├── Max Latency : {max(self.bench_latencies):.2f} ms\n"
                             f" └── Avg Size    : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} points/frame\n"
                             f"====================================="
                         )
                         self.log_message(summary)
-                        
+
             # Plot Rendering
             if len(xs) > 0:
                 self.ax.clear()
