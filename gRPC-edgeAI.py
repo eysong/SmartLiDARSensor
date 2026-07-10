@@ -62,13 +62,17 @@ class GrpcEdgeDashboardApp:
         subjects_frame.rowconfigure(0, weight=1)
         subjects_frame.columnconfigure(0, weight=1)
 
-        self.tree = ttk.Treeview(subjects_frame, columns=("id", "type", "speed"), show="headings")
-        self.tree.heading("id", text="Cluster ID")
-        self.tree.heading("type", text="Classification")
-        self.tree.heading("speed", text="Travel Speed")
-        self.tree.column("id", anchor="center")
-        self.tree.column("type", anchor="center")
-        self.tree.column("speed", anchor="center")
+        # --- SDSM COMPLIANT SUBJECTS TABLE ---
+        self.tree = ttk.Treeview(subjects_frame, columns=("objectID", "objType", "pos", "speed"), show="headings")
+        self.tree.heading("objectID", text="objectID (Temp ID)")
+        self.tree.heading("objType", text="objType & OptionalData")
+        self.tree.heading("pos", text="pos (PositionOffsetXYZ)")
+        self.tree.heading("speed", text="speed (Magnitude)")
+        
+        self.tree.column("objectID", anchor="center", width=100)
+        self.tree.column("objType", anchor="center", width=180)
+        self.tree.column("pos", anchor="center", width=180)
+        self.tree.column("speed", anchor="center", width=100)
         self.tree.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         # Telemetry Log
@@ -117,7 +121,6 @@ class GrpcEdgeDashboardApp:
         if latest_packet:
             _, wire_arrival_time, frame_data = latest_packet
             
-            # 1. ROBUST TIMESTAMP EXTRACTION (Cascade through possible locations)
             raw_ts = (
                 frame_data.get("timestamp") or
                 frame_data.get("frame", {}).get("timestamp") or
@@ -126,7 +129,6 @@ class GrpcEdgeDashboardApp:
                 0.0
             )
 
-            # 2. STRING & NUMBER PARSER
             sensor_epoch = 0.0
             if isinstance(raw_ts, str):
                 try:
@@ -144,14 +146,12 @@ class GrpcEdgeDashboardApp:
                 except (ValueError, TypeError):
                     pass
 
-            # 3. NTP-RELIANT LATENCY MATH
             if sensor_epoch > 0:
                 edge_lat_ms = abs(wire_arrival_time - sensor_epoch) * 1000
                 lat_str = f"{edge_lat_ms:.2f}ms"
             else:
                 lat_str = "UNKNOWN"
                 
-            # (Keep the rest of your object parsing code below this...)
             raw_objs = frame_data.get("objects", {})
             obj_map = raw_objs.get("objects", {}) if isinstance(raw_objs, dict) and "objects" in raw_objs else raw_objs
             incoming_intrusions = []
@@ -161,22 +161,34 @@ class GrpcEdgeDashboardApp:
                     if not isinstance(obj, dict): continue
                     intruding = obj.get("intruding", {})
                     if intruding.get("value") is True or intruding.get("state") is True:
-                        props = obj.get("properties", {}) or obj.get("classification", {})
-                        raw_size = str(props.get("size", "")).upper()
-                        
-                        friendly_type = "UNCLASSIFIED_MOTION"
-                        if "MEDIUM" in raw_size: friendly_type = "PERSON"
-                        elif "LARGE" in raw_size: friendly_type = "VEHICLE"
-                        elif "SMALL" in raw_size: friendly_type = "ANIMAL_OR_DEBRIS"
+                        # 1. Extract pos (PositionOffsetXYZ)
+                        centroid = obj.get("center_of_mass", {})
+                        cx = round(centroid.get("x", 0.0), 2)
+                        cy = round(centroid.get("y", 0.0), 2)
+                        cz = round(centroid.get("z", 0.0), 2)
 
+                        # 2. Extract speed
                         vel = obj.get("velocity", {})
                         vx, vy, vz = vel.get("x", 0), vel.get("y", 0), vel.get("z", 0)
                         speed_mph = math.sqrt(vx**2 + vy**2 + vz**2) * 2.23694
 
+                        # 3. Map to objType & DetectedObjectOptionalData CHOICE
+                        props = obj.get("properties", {}) or obj.get("classification", {})
+                        raw_size = str(props.get("size", "")).upper()
+                        
+                        if "MEDIUM" in raw_size: 
+                            sdsm_type = "VRU (detVRUData)" 
+                        elif "LARGE" in raw_size: 
+                            sdsm_type = "VEHICLE (detVehData)" 
+                        else: 
+                            sdsm_type = "OBSTACLE (detObstData)"
+
+                        # 4. Package as DetectedObjectCommonData
                         incoming_intrusions.append({
-                            "cluster_id": str(obj_id),
-                            "classification": friendly_type,
-                            "speed_mph": round(speed_mph, 1),
+                            "objectID": str(obj_id),
+                            "objType": sdsm_type,
+                            "pos": f"[{cx}, {cy}, {cz}]",
+                            "speed": round(speed_mph, 1),
                         })
 
             if len(incoming_intrusions) > 0:
@@ -185,13 +197,11 @@ class GrpcEdgeDashboardApp:
                 if (now - self.last_log_time) >= COOLDOWN_SECONDS:
                     self.last_log_time = now
                     
-                    # Convert both epochs to human-readable format
                     sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
                     recv_time_str = datetime.fromtimestamp(wire_arrival_time).strftime('%H:%M:%S.%f')[:-3]
                     
-                    self.log_message(f"INTRUSION | Sensor: {sensor_time_str} -> Laptop: {recv_time_str} | Latency: {lat_str}")
+                    self.log_message(f"SDSM INTRUSION | measurementTime: {sensor_time_str} | Receipt Time: {recv_time_str} | Transit Delay: {lat_str}")
 
-        # UI Drawing
         is_alarm = now < self.alarm_active_until
         display_list = self.cached_subjects if is_alarm else []
 
@@ -206,7 +216,7 @@ class GrpcEdgeDashboardApp:
 
             for item in self.tree.get_children(): self.tree.delete(item)
             for target in display_list:
-                self.tree.insert("", tk.END, values=(target["cluster_id"], target["classification"], f"{target['speed_mph']} mph"))
+                self.tree.insert("", tk.END, values=(target["objectID"], target["objType"], target["pos"], f"{target['speed']} mph"))
 
         self.root.after(100, self._ui_consumer_tick)
 

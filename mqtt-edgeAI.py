@@ -62,13 +62,17 @@ class MqttDashboardApp:
         subjects_frame.rowconfigure(0, weight=1)
         subjects_frame.columnconfigure(0, weight=1)
 
-        self.tree = ttk.Treeview(subjects_frame, columns=("id", "type", "speed"), show="headings")
-        self.tree.heading("id", text="Cluster ID")
-        self.tree.heading("type", text="Classification")
-        self.tree.heading("speed", text="Travel Speed")
-        self.tree.column("id", anchor="center")
-        self.tree.column("type", anchor="center")
-        self.tree.column("speed", anchor="center")
+        # --- SDSM COMPLIANT SUBJECTS TABLE ---
+        self.tree = ttk.Treeview(subjects_frame, columns=("objectID", "objType", "pos", "speed"), show="headings")
+        self.tree.heading("objectID", text="objectID (Temp ID)")
+        self.tree.heading("objType", text="objType & OptionalData")
+        self.tree.heading("pos", text="pos (PositionOffsetXYZ)")
+        self.tree.heading("speed", text="speed (Magnitude)")
+        
+        self.tree.column("objectID", anchor="center", width=100)
+        self.tree.column("objType", anchor="center", width=180)
+        self.tree.column("pos", anchor="center", width=180)
+        self.tree.column("speed", anchor="center", width=100)
         self.tree.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         # Log
@@ -130,7 +134,6 @@ class MqttDashboardApp:
         if latest_mqtt:
             _, wire_arrival_time, payload = latest_mqtt
             
-            # Extract timestamp from your custom Node-RED JSON
             raw_ts = payload.get("timestamp") or payload.get("time") or 0.0
             sensor_epoch = 0.0
             
@@ -146,7 +149,6 @@ class MqttDashboardApp:
                     pass
 
             if sensor_epoch > 0:
-                # Basic latency math (relies on NTP sync between sensor and laptop)
                 edge_lat_ms = abs(wire_arrival_time - sensor_epoch) * 1000
                 lat_str = f"{edge_lat_ms:.2f}ms"
             else:
@@ -158,10 +160,23 @@ class MqttDashboardApp:
             if isinstance(custom_subjects, list):
                 for subj in custom_subjects:
                     if isinstance(subj, dict):
+                        cx = round(subj.get("x", 0.0), 2)
+                        cy = round(subj.get("y", 0.0), 2)
+                        cz = round(subj.get("z", 0.0), 2)
+                        
+                        raw_class = str(subj.get("classification", "")).upper()
+                        if "PERSON" in raw_class or "MEDIUM" in raw_class:
+                            sdsm_type = "VRU (detVRUData)"
+                        elif "VEHICLE" in raw_class or "LARGE" in raw_class:
+                            sdsm_type = "VEHICLE (detVehData)"
+                        else:
+                            sdsm_type = "OBSTACLE (detObstData)"
+
                         incoming_intrusions.append({
-                            "cluster_id": str(subj.get("cluster_id", "Unknown")),
-                            "classification": subj.get("classification", "UNCLASSIFIED_MOTION"),
-                            "speed_mph": float(subj.get("speed_mph", 0.0)),
+                            "objectID": str(subj.get("cluster_id", "Unknown")),
+                            "objType": sdsm_type,
+                            "pos": f"[{cx}, {cy}, {cz}]",
+                            "speed": round(float(subj.get("speed_mph", 0.0)), 1),
                         })
 
             if len(incoming_intrusions) > 0:
@@ -170,13 +185,11 @@ class MqttDashboardApp:
                 if (now - self.last_log_time) >= COOLDOWN_SECONDS:
                     self.last_log_time = now
                     
-                    # Convert both epochs to human-readable format
                     sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
                     recv_time_str = datetime.fromtimestamp(wire_arrival_time).strftime('%H:%M:%S.%f')[:-3]
                     
-                    self.log_message(f"INTRUSION | Sensor: {sensor_time_str} -> Laptop: {recv_time_str} | Latency: {lat_str}")
+                    self.log_message(f"SDSM INTRUSION | measurementTime: {sensor_time_str} | Receipt Time: {recv_time_str} | Transit Delay: {lat_str}")
 
-        # UI Updates
         is_alarm = now < self.alarm_active_until
         display_list = self.cached_subjects if is_alarm else []
 
@@ -190,13 +203,13 @@ class MqttDashboardApp:
                 self.status_label.configure(bg=target_bg, text=master_threat)
 
             rendered_ids = [self.tree.item(c)["values"][0] for c in self.tree.get_children() if self.tree.item(c)["values"]]
-            new_ids = [x["cluster_id"] for x in display_list]
+            new_ids = [x["objectID"] for x in display_list]
             
             if new_ids != rendered_ids:
                 for item in self.tree.get_children():
                     self.tree.delete(item)
                 for target in display_list:
-                    self.tree.insert("", tk.END, values=(target["cluster_id"], target["classification"], f"{target['speed_mph']} mph"))
+                    self.tree.insert("", tk.END, values=(target["objectID"], target["objType"], target["pos"], f"{target['speed']} mph"))
 
         self.root.after(100, self._ui_consumer_tick)
 

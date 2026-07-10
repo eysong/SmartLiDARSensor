@@ -14,7 +14,7 @@ from matplotlib.figure import Figure
 # ==========================================
 MQTT_BROKER = "127.0.0.1"
 MQTT_PORT = 1883
-MQTT_TOPIC = "blickfeld/raw_pointcloud"  # Change this to match your Node-RED/Push topic
+MQTT_TOPIC = "blickfeld/raw_pointcloud"
 
 class MqttRawDashboardApp:
     def __init__(self, root):
@@ -39,7 +39,6 @@ class MqttRawDashboardApp:
         self.root.after(100, self._ui_consumer_tick)
 
     def _build_ui(self):
-        # 3D Matplotlib Canvas
         pc_frame = tk.LabelFrame(self.root, text=" Unpacked MQTT 3D Matrix Stream ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
         pc_frame.grid(row=0, column=0, sticky="nsew", padx=15, pady=10)
 
@@ -49,7 +48,6 @@ class MqttRawDashboardApp:
         self.canvas = FigureCanvasTkAgg(self.fig, master=pc_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # Performance Monitor Log
         bench_frame = tk.LabelFrame(self.root, text=" MQTT Buffer Load Diagnostics ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
         bench_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 15), pady=10)
         bench_frame.rowconfigure(0, weight=1)
@@ -81,7 +79,6 @@ class MqttRawDashboardApp:
                 payload = json.loads(msg.payload.decode("utf-8"))
                 self.packet_queue.put(("PC_DATA", t_recv, payload))
             except Exception as e:
-                # WE ADDED THIS PRINT STATEMENT
                 print(f"⚠️ PYTHON PARSE ERROR: {e}")
 
         try:
@@ -113,20 +110,16 @@ class MqttRawDashboardApp:
         if latest_packet:
             _, recv_time, payload = latest_packet
             
-            # Expecting payload to contain arrays of 'x', 'y', 'z' coordinates
-            # Structured as: {"timestamp": 12345, "x": [...], "y": [...], "z": [...]}
             xs = payload.get("x", [])
             ys = payload.get("y", [])
             zs = payload.get("z", [])
             self.cached_xyz = (xs, ys, zs)
 
-            # --- WITH THIS NEW SAFE VERSION ---
             raw_ts = payload.get("timestamp", 0.0)
             sensor_epoch = 0.0
             
             if isinstance(raw_ts, str):
                 try:
-                    # Handle both ISO strings and stringified numbers
                     if "T" in raw_ts:
                         sensor_epoch = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
                     else:
@@ -147,9 +140,8 @@ class MqttRawDashboardApp:
                     sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
                     recv_time_str = datetime.fromtimestamp(recv_time).strftime('%H:%M:%S.%f')[:-3]
                     
-                    self.log_message(f"🛑 BOTTLENECK | Created: {sensor_time_str} | Received: {recv_time_str} | Latency: {transit_ms:.1f}ms")
+                    self.log_message(f"🛑 TIMING FAULT | measurementTime: {sensor_time_str} | Receipt Time: {recv_time_str} | Offset: {transit_ms:.1f}ms")
 
-            # Graph painting limit
             now = time.time()
             if (now - self.last_ui_paint) >= 0.4 and len(xs) > 0:
                 self.last_ui_paint = now
@@ -157,7 +149,6 @@ class MqttRawDashboardApp:
                 self.ax.set_facecolor("#1e1e2e")
                 self.ax.tick_params(colors="white", labelsize=7)
 
-                # Heavy downsampling to prevent GUI lockup
                 step = max(1, len(xs) // 1500)
                 sub_x, sub_y, sub_z = xs[::step], ys[::step], zs[::step]
 

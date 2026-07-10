@@ -41,7 +41,6 @@ class GrpcBenchmarkApp:
         self.root.after(100, self._ui_consumer_tick)
 
     def _build_ui(self):
-        # 3D Plot
         pc_frame = tk.LabelFrame(self.root, text=" Live gRPC 3D Laser Stream ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
         pc_frame.grid(row=0, column=0, sticky="nsew", padx=15, pady=10)
 
@@ -51,7 +50,6 @@ class GrpcBenchmarkApp:
         self.canvas = FigureCanvasTkAgg(self.fig, master=pc_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # Benchmark Tools
         bench_frame = tk.LabelFrame(self.root, text=" Network Benchmarker ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
         bench_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 15), pady=10)
         bench_frame.rowconfigure(2, weight=1)
@@ -138,12 +136,9 @@ class GrpcBenchmarkApp:
             raw_ts = getattr(pc_frame, "timestamp", None) or 0.0
             pc_sensor_epoch = float(raw_ts) / 1e9 if float(raw_ts) > 1e16 else float(raw_ts)
 
-            # Benchmarking Logic
-            # --- NTP-RELIANT BENCHMARKING LOGIC ---
             if self.bench_active:
                 if time.time() <= self.bench_end_time:
                     if pc_sensor_epoch > 0:
-                        # Absolute physical transit time using NTP sync
                         raw_lat_ms = abs(pc_wire_time - pc_sensor_epoch) * 1000
                         self.bench_latencies.append(raw_lat_ms)
                         self.bench_points_count.append(len(xs))
@@ -153,21 +148,19 @@ class GrpcBenchmarkApp:
                     self.bench_status.configure(text="Status: Benchmark complete!", fg="#a6e3a1")
 
                     if len(self.bench_latencies) > 0:
-                        # Grab the first frame's times to show the start of the benchmark
                         first_sensor_time = datetime.fromtimestamp(pc_sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
                         first_recv_time = datetime.fromtimestamp(pc_wire_time).strftime('%H:%M:%S.%f')[:-3]
                         
                         summary = (
-                            f"\n=== RESULTS ({len(self.bench_latencies)} Frames) ===\n"
-                            f" ├── Stream Start: Sensor @ {first_sensor_time} -> Laptop @ {first_recv_time}\n"
-                            f" ├── Avg Latency : {sum(self.bench_latencies)/len(self.bench_latencies):.2f} ms\n"
-                            f" ├── Max Latency : {max(self.bench_latencies):.2f} ms\n"
-                            f" └── Avg Size    : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} points/frame\n"
+                            f"\n=== SDSM SYNC RESULTS ({len(self.bench_latencies)} Frames) ===\n"
+                            f" ├── Stream Start: measurementTime @ {first_sensor_time} -> Receipt Time @ {first_recv_time}\n"
+                            f" ├── Avg Transit Delay : {sum(self.bench_latencies)/len(self.bench_latencies):.2f} ms\n"
+                            f" ├── Max Offset        : {max(self.bench_latencies):.2f} ms\n"
+                            f" └── pos (Points) Avg  : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} per frame\n"
                             f"====================================="
                         )
                         self.log_message(summary)
 
-            # Plot Rendering
             if len(xs) > 0:
                 self.ax.clear()
                 self.ax.set_facecolor("#1e1e2e")
