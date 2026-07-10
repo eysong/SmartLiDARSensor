@@ -31,6 +31,7 @@ class GrpcEdgeDashboardApp:
         self.alarm_active_until = 0
         self.last_ui_paint = 0
         self.cached_subjects = []
+        self.tree_items = {}
 
         self.root.rowconfigure(1, weight=1)
         self.root.rowconfigure(2, weight=1)
@@ -200,10 +201,13 @@ class GrpcEdgeDashboardApp:
                     sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
                     recv_time_str = datetime.fromtimestamp(wire_arrival_time).strftime('%H:%M:%S.%f')[:-3]
                     
-                    self.log_message(f"SDSM INTRUSION | measurementTime: {sensor_time_str} | Receipt Time: {recv_time_str} | Transit Delay: {lat_str}")
+                    # Extract all object IDs present in this frame
+                    obj_ids = ", ".join([str(subj["objectID"]) for subj in incoming_intrusions])
+                    
+                    self.log_message(f"SDSM INTRUSION [IDs: {obj_ids}] | measurementTime: {sensor_time_str} | Receipt Time: {recv_time_str} | Transit Delay: {lat_str}")
 
+        # UI Drawing
         is_alarm = now < self.alarm_active_until
-        display_list = self.cached_subjects if is_alarm else []
 
         if (now - self.last_ui_paint) >= UI_REFRESH_RATE_SEC:
             self.last_ui_paint = now
@@ -214,9 +218,25 @@ class GrpcEdgeDashboardApp:
                 self.status_frame.configure(bg=target_bg)
                 self.status_label.configure(bg=target_bg, text=master_threat)
 
-            for item in self.tree.get_children(): self.tree.delete(item)
-            for target in display_list:
-                self.tree.insert("", tk.END, values=(target["objectID"], target["objType"], target["pos"], f"{target['speed']} mph"))
+            # Historical Log Logic (Update existing, append new to top)
+            if is_alarm:
+                for target in self.cached_subjects:
+                    obj_id = str(target["objectID"])
+                    vals = (target["objectID"], target["objType"], target["pos"], f"{target['speed']} mph")
+                    
+                    if obj_id in self.tree_items:
+                        self.tree.item(self.tree_items[obj_id], values=vals)
+                    else:
+                        item = self.tree.insert("", 0, values=vals)
+                        self.tree_items[obj_id] = item
+                        
+                    # Cap the UI log at 100 rows to prevent the app from freezing over long durations
+                    if len(self.tree_items) > 100:
+                        last_item = self.tree.get_children()[-1]
+                        last_id = self.tree.item(last_item)["values"][0]
+                        self.tree.delete(last_item)
+                        if str(last_id) in self.tree_items:
+                            del self.tree_items[str(last_id)]
 
         self.root.after(100, self._ui_consumer_tick)
 
