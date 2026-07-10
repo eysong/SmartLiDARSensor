@@ -1,132 +1,201 @@
-import math
+import json
+import queue
+import threading
 import time
 from datetime import datetime, timezone
-import blickfeld_qb2
+import tkinter as tk
+from tkinter import ttk
+import paho.mqtt.client as mqtt
 
+# ==========================================
 # --- CONFIGURATION ---
-# the exact name of the security zone polygon drawn in the Blickfeld WebGUI
-TARGET_ZONE = "Security Zone 1"
-# prevents terminal spam by forcing the script to wait 5 seconds between alerts
-COOLDOWN_SECONDS = 5  
+# ==========================================
+COOLDOWN_SECONDS = 5
+ALARM_HOLD_SECONDS = 1.5
+UI_REFRESH_RATE_SEC = 0.2
 
-# --- AUTHENTICATION ---
-# the LiDAR requires a secure API token to allow direct gRPC connections.
-token_factory = blickfeld_qb2.TokenFactory(
-    application_key_secret="2ee812bc2e745dddb8i1cmJwrEaz8ehy"
-)
+MQTT_BROKER = "127.0.0.1"
+MQTT_PORT = 1883
+MQTT_TOPIC = "#"
 
-# --- CONNECTION ---
-# opens a direct, authenticated gRPC channel to the sensor's IP address
-with blickfeld_qb2.Channel(
-    fqdn_or_ip="192.168.26.26", token=token_factory
-) as channel:
-  
-  # connects specifically to the Qb2's internal 3D Perception engine
-  service = blickfeld_qb2.percept_processing.services.Objects(channel)
-  
-  print(
-      f"[*] Listening to gRPC stream for intrusions in '{TARGET_ZONE}'... (Rate"
-      f" limit: 1 msg per {COOLDOWN_SECONDS}s)"
-  )
+class MqttDashboardApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Blickfeld: MQTT Intrusion Monitor")
+        self.root.geometry("800x500")
+        self.root.configure(bg="#1e1e2e")
 
-  # initializes the rate limiter stopwatch to 0
-  last_alarm_time = 0
+        self.packet_queue = queue.Queue()
+        self.last_log_time = 0
+        self.alarm_active_until = 0
+        self.last_ui_paint = 0
+        self.cached_subjects = []
 
-  # --- MAIN STREAMING LOOP ---
-  # this loop runs continuously at 15 frames per second
-  for response in service.stream():
-    
-    # converts the incoming C++ Protobuf packet into a standard Python dictionary
-    frame_data = response.to_dict() 
+        self.root.rowconfigure(1, weight=1)
+        self.root.rowconfigure(2, weight=1)
+        self.root.columnconfigure(0, weight=1)
 
-    # --- UN-NESTING THE DATA ---
-    # the gRPC schema double-nests the objects data (frame -> objects -> objects).
-    # this safely drills down to the actual dictionary of tracked physical masses.
-    raw_objs = frame_data.get("objects", {})
-    obj_map = (
-        raw_objs.get("objects", {})
-        if isinstance(raw_objs, dict) and "objects" in raw_objs
-        else raw_objs
-    )
+        self._build_ui()
 
-    active_intrusions = []
+        self.mqtt_thread = threading.Thread(target=self._mqtt_subscriber_thread, daemon=True)
+        self.mqtt_thread.start()
 
-    # loop through every tracked 3D cluster in the current frame
-    for obj_id, obj in obj_map.items():
-      # ignore any metadata properties that aren't physical objects
-      if not isinstance(obj, dict):
-        continue
+        self.root.after(100, self._ui_consumer_tick)
 
-      intruding = obj.get("intruding", {})
+    def _build_ui(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Treeview", background="#252538", foreground="white", fieldbackground="#252538", rowheight=26)
+        style.configure("Treeview.Heading", background="#32324d", foreground="white", relief="flat")
+        style.map("Treeview", background=[("selected", "#4c4f69")])
 
-      # check if the LiDAR's internal math flagged this object as intruding a zone
-      if intruding.get("value") is True or intruding.get("state") is True:
-        
-        intruder = obj.get("intruder", {})
-        # safely extract the name of the zone the object is violating
-        rep_zone = (
-            intruder.get("zone_name")
-            or intruder.get("zone_id")
-            or intruder.get("name")
-            or ""
-        )
+        # Status Banner
+        self.status_frame = tk.Frame(self.root, bg="#a6e3a1", height=80)
+        self.status_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=10)
+        self.status_frame.grid_propagate(False)
+        self.status_label = tk.Label(self.status_frame, text="SYSTEM SECURED - NO INTRUSIONS", font=("Arial", 16, "bold"), bg="#a6e3a1", fg="#11111b")
+        self.status_label.pack(expand=True)
 
-        # confirm the object is violating our specific target zone
-        if rep_zone in (TARGET_ZONE, ""):
-          
-          # --- CLASSIFICATION TRANSLATION ---
-          # grab the LiDAR's native physical size bucket calculation
-          props = obj.get("properties", {}) or obj.get("classification", {})
-          raw_size = props.get("size", "")
+        # Subjects Table
+        subjects_frame = tk.LabelFrame(self.root, text=" Tracked Subjects ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
+        subjects_frame.grid(row=1, column=0, sticky="nsew", padx=15, pady=5)
+        subjects_frame.rowconfigure(0, weight=1)
+        subjects_frame.columnconfigure(0, weight=1)
 
-          # translate the raw volume metrics into plain English types
-          friendly_type = "UNCLASSIFIED_MOTION"
-          if "MEDIUM" in raw_size:
-            friendly_type = "PERSON"
-          elif "LARGE" in raw_size:
-            friendly_type = "VEHICLE"
-          elif "SMALL" in raw_size:
-            friendly_type = "ANIMAL_OR_DEBRIS"
+        self.tree = ttk.Treeview(subjects_frame, columns=("id", "type", "speed"), show="headings")
+        self.tree.heading("id", text="Cluster ID")
+        self.tree.heading("type", text="Classification")
+        self.tree.heading("speed", text="Travel Speed")
+        self.tree.column("id", anchor="center")
+        self.tree.column("type", anchor="center")
+        self.tree.column("speed", anchor="center")
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-          # --- VELOCITY CALCULATION ---
-          # use the Pythagorean theorem on the 3D velocity vectors (x, y, z in m/s)
-          # then multiply by 2.23694 to convert to Miles Per Hour
-          vel = obj.get("velocity", {})
-          vx, vy, vz = vel.get("x", 0), vel.get("y", 0), vel.get("z", 0)
-          speed_mph = math.sqrt(vx**2 + vy**2 + vz**2) * 2.23694
+        # Log
+        perf_frame = tk.LabelFrame(self.root, text=" Telemetry Log ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
+        perf_frame.grid(row=2, column=0, sticky="nsew", padx=15, pady=10)
+        perf_frame.rowconfigure(0, weight=1)
+        perf_frame.columnconfigure(0, weight=1)
 
-          # add the processed subject to this frame's list of intruders
-          active_intrusions.append({
-              "cluster_id": str(obj_id),
-              "classification": friendly_type,
-              "speed_mph": round(speed_mph, 1),
-          })
+        self.edge_log = tk.Text(perf_frame, bg="#181825", fg="#bac2de", font=("Consolas", 10), state="disabled", wrap="word")
+        self.edge_log.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        scroll = ttk.Scrollbar(perf_frame, orient="vertical", command=self.edge_log.yview)
+        self.edge_log.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=0, column=1, sticky="ns")
 
-    # --- ALARM GENERATION & RATE LIMITING ---
-    # only proceed if there is at least one active subject in the zone
-    if len(active_intrusions) > 0:
-      current_time = time.time()
+    def log_message(self, msg):
+        self.edge_log.configure(state="normal")
+        self.edge_log.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}\n")
+        self.edge_log.see(tk.END)
+        self.edge_log.configure(state="disabled")
 
-      # RATE LIMITER: Check if 5 seconds have passed since the last alert was printed
-      if (current_time - last_alarm_time) >= COOLDOWN_SECONDS:
-        
-        # update the stopwatch to prevent immediate re-triggering
-        last_alarm_time = current_time
+    def _mqtt_subscriber_thread(self):
+        def on_connect(client, userdata, flags, rc, properties=None):
+            if rc == 0:
+                self.packet_queue.put(("LOG", f"ONLINE: Connected to local MQTT Broker on {MQTT_PORT}"))
+                client.subscribe(MQTT_TOPIC)
+            else:
+                self.packet_queue.put(("LOG", f"ERROR: MQTT Connection failed with code {rc}"))
 
-        # upgrade the master threat level if a high-priority subject is detected
-        master_threat = "MOTION_DETECTED"
-        if any(x["classification"] == "PERSON" for x in active_intrusions):
-          master_threat = "PERSON_DETECTED"
-        elif any(x["classification"] == "VEHICLE" for x in active_intrusions):
-          master_threat = "VEHICLE_DETECTED"
+        def on_message(client, userdata, msg):
+            try:
+                payload = json.loads(msg.payload.decode("utf-8"))
+                self.packet_queue.put(("MQTT", time.time(), payload))
+            except Exception:
+                pass
 
-        # construct the final, clean JSON payload to send to the terminal
-        clean_payload = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "zone": TARGET_ZONE,
-            "alarm_type": master_threat,
-            "subject_count": len(active_intrusions),
-            "subjects": active_intrusions,
-        }
+        try:
+            try:
+                client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id="MQTT_Dash")
+            except AttributeError:
+                client = mqtt.Client(client_id="MQTT_Dash")
+            client.on_connect = on_connect
+            client.on_message = on_message
+            client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            client.loop_forever()
+        except Exception as e:
+            self.packet_queue.put(("LOG", f"MQTT ERROR: {str(e)}"))
 
-        print(clean_payload)
+    def _ui_consumer_tick(self):
+        latest_mqtt = None
+        now = time.time()
+
+        while not self.packet_queue.empty():
+            item = self.packet_queue.get_nowait()
+            if item[0] == "LOG":
+                self.log_message(item[1])
+            elif item[0] == "MQTT":
+                latest_mqtt = item
+
+        if latest_mqtt:
+            _, wire_arrival_time, payload = latest_mqtt
+            
+            # Extract timestamp from your custom Node-RED JSON
+            raw_ts = payload.get("timestamp") or payload.get("time") or 0.0
+            sensor_epoch = 0.0
+            
+            if isinstance(raw_ts, str):
+                try:
+                    sensor_epoch = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    pass
+            else:
+                try:
+                    sensor_epoch = float(raw_ts) / 1e9 if float(raw_ts) > 1e16 else (float(raw_ts) / 1e3 if float(raw_ts) > 1e10 else float(raw_ts))
+                except (ValueError, TypeError):
+                    pass
+
+            if sensor_epoch > 0:
+                # Basic latency math (relies on NTP sync between sensor and laptop)
+                edge_lat_ms = abs(wire_arrival_time - sensor_epoch) * 1000
+                lat_str = f"{edge_lat_ms:.2f}ms"
+            else:
+                lat_str = "UNKNOWN"
+
+            incoming_intrusions = []
+            custom_subjects = payload.get("subjects") or []
+            
+            if isinstance(custom_subjects, list):
+                for subj in custom_subjects:
+                    if isinstance(subj, dict):
+                        incoming_intrusions.append({
+                            "cluster_id": str(subj.get("cluster_id", "Unknown")),
+                            "classification": subj.get("classification", "UNCLASSIFIED_MOTION"),
+                            "speed_mph": float(subj.get("speed_mph", 0.0)),
+                        })
+
+            if len(incoming_intrusions) > 0:
+                self.alarm_active_until = now + ALARM_HOLD_SECONDS
+                self.cached_subjects = incoming_intrusions
+                if (now - self.last_log_time) >= COOLDOWN_SECONDS:
+                    self.last_log_time = now
+                    self.log_message(f"INTRUSION | Latency/Drift: {lat_str} | Active Subjects: {len(incoming_intrusions)}")
+
+        # UI Updates
+        is_alarm = now < self.alarm_active_until
+        display_list = self.cached_subjects if is_alarm else []
+
+        if (now - self.last_ui_paint) >= UI_REFRESH_RATE_SEC:
+            self.last_ui_paint = now
+            
+            target_bg = "#f38ba8" if is_alarm else "#a6e3a1"
+            master_threat = "ALARM: INTRUSION DETECTED!" if is_alarm else "SYSTEM SECURED - NO INTRUSIONS"
+            if self.status_label.cget("text") != master_threat:
+                self.status_frame.configure(bg=target_bg)
+                self.status_label.configure(bg=target_bg, text=master_threat)
+
+            rendered_ids = [self.tree.item(c)["values"][0] for c in self.tree.get_children() if self.tree.item(c)["values"]]
+            new_ids = [x["cluster_id"] for x in display_list]
+            
+            if new_ids != rendered_ids:
+                for item in self.tree.get_children():
+                    self.tree.delete(item)
+                for target in display_list:
+                    self.tree.insert("", tk.END, values=(target["cluster_id"], target["classification"], f"{target['speed_mph']} mph"))
+
+        self.root.after(100, self._ui_consumer_tick)
+
+if __name__ == "__main__":
+    window = tk.Tk()
+    app = MqttDashboardApp(window)
+    window.mainloop()
