@@ -154,9 +154,26 @@ class MqttDashboardApp:
                 except (ValueError, TypeError):
                     pass
 
-            if sensor_epoch > 0:
-                edge_lat_ms = abs(wire_arrival_time - sensor_epoch) * 1000
-                lat_str = f"{edge_lat_ms:.2f}ms"
+            # --- NEW: EXTRACT SENDING TIME & SPLIT-LATENCY MATH ---
+            raw_send_ts = payload.get("send_time") or 0.0
+            send_epoch = 0.0
+            if raw_send_ts:
+                if isinstance(raw_send_ts, str):
+                    try: send_epoch = datetime.fromisoformat(raw_send_ts.replace("Z", "+00:00")).timestamp()
+                    except Exception: pass
+                else:
+                    try: send_epoch = float(raw_send_ts) / 1e9 if float(raw_send_ts) > 1e16 else (float(raw_send_ts) / 1e3 if float(raw_send_ts) > 1e10 else float(raw_send_ts))
+                    except (ValueError, TypeError): pass
+
+            if sensor_epoch > 0 and send_epoch > 0:
+                proc_ms = abs(send_epoch - sensor_epoch) * 1000         # Node-RED processing / rate limit tax
+                net_ms = abs(wire_arrival_time - send_epoch) * 1000     # Wire / Broker delay
+                total_ms = abs(wire_arrival_time - sensor_epoch) * 1000 # Total Pipeline Speed
+                lat_str = f"Proc: {proc_ms:.1f}ms | Net: {net_ms:.1f}ms | Total: {total_ms:.1f}ms"
+            elif sensor_epoch > 0:
+                # Fallback if send_time has not been added to Node-RED flow yet
+                total_ms = abs(wire_arrival_time - sensor_epoch) * 1000
+                lat_str = f"Total: {total_ms:.2f}ms (No send_time tag)"
             else:
                 lat_str = "UNKNOWN"
 
@@ -191,13 +208,15 @@ class MqttDashboardApp:
                 if (now - self.last_log_time) >= COOLDOWN_SECONDS:
                     self.last_log_time = now
                     
-                    sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
+                    sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3] if sensor_epoch > 0 else "N/A"
+                    send_time_str = datetime.fromtimestamp(send_epoch).strftime('%H:%M:%S.%f')[:-3] if send_epoch > 0 else "N/A"
                     recv_time_str = datetime.fromtimestamp(wire_arrival_time).strftime('%H:%M:%S.%f')[:-3]
                     
                     # Extract all object IDs present in this frame
                     obj_ids = ", ".join([str(subj["objectID"]) for subj in incoming_intrusions])
                     
-                    self.log_message(f"SDSM INTRUSION [IDs: {obj_ids}] | measurementTime: {sensor_time_str} | Receipt Time: {recv_time_str} | Transit Delay: {lat_str}")
+                    # --- NEW: LOG WITH TIMELINE AND DELAY BREAKDOWN ---
+                    self.log_message(f"SDSM INTRUSION [IDs: {obj_ids}] | Sense: {sensor_time_str} | Send: {send_time_str} | Recv: {recv_time_str} | Delay Breakdown -> {lat_str}")
 
         # UI Updates
         is_alarm = now < self.alarm_active_until

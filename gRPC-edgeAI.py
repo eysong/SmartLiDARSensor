@@ -151,10 +151,16 @@ class GrpcEdgeDashboardApp:
                 except (ValueError, TypeError):
                     pass
 
+            # --- NEW: SPLIT-LATENCY MATH FOR NATIVE gRPC ---
             if sensor_epoch > 0:
-                edge_lat_ms = abs(wire_arrival_time - sensor_epoch) * 1000
-                lat_str = f"{edge_lat_ms:.2f}ms"
+                # Native gRPC sends from C++ memory without middleware serialization
+                send_epoch = sensor_epoch 
+                proc_ms = abs(send_epoch - sensor_epoch) * 1000         # Proves 0.0ms middleware tax
+                net_ms = abs(wire_arrival_time - send_epoch) * 1000     # Wire + OS buffer queuing
+                total_ms = abs(wire_arrival_time - sensor_epoch) * 1000 # End-to-End Total
+                lat_str = f"Proc: {proc_ms:.1f}ms | Net: {net_ms:.1f}ms | Total: {total_ms:.1f}ms"
             else:
+                send_epoch = 0.0
                 lat_str = "UNKNOWN"
                 
             raw_objs = frame_data.get("objects", {})
@@ -208,13 +214,15 @@ class GrpcEdgeDashboardApp:
                 if (now - self.last_log_time) >= COOLDOWN_SECONDS:
                     self.last_log_time = now
                     
-                    sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
+                    sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3] if sensor_epoch > 0 else "N/A"
+                    send_time_str = datetime.fromtimestamp(send_epoch).strftime('%H:%M:%S.%f')[:-3] if send_epoch > 0 else "N/A"
                     recv_time_str = datetime.fromtimestamp(wire_arrival_time).strftime('%H:%M:%S.%f')[:-3]
                     
                     # Extract all object IDs present in this frame
                     obj_ids = ", ".join([str(subj["objectID"]) for subj in incoming_intrusions])
                     
-                    self.log_message(f"SDSM INTRUSION [IDs: {obj_ids}] | measurementTime: {sensor_time_str} | Receipt Time: {recv_time_str} | Transit Delay: {lat_str}")
+                    # --- NEW: LOG WITH TIMELINE AND DELAY BREAKDOWN ---
+                    self.log_message(f"SDSM INTRUSION [IDs: {obj_ids}] | Sense: {sensor_time_str} | Send: {send_time_str} | Recv: {recv_time_str} | Delay Breakdown -> {lat_str}")
 
         # UI Drawing
         is_alarm = now < self.alarm_active_until

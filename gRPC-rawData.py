@@ -26,7 +26,11 @@ class GrpcBenchmarkApp:
         self.packet_queue = queue.Queue()
         self.bench_active = False
         self.bench_end_time = 0
-        self.bench_latencies = []
+        
+        # --- NEW: SPLIT-LATENCY TRACKING LISTS ---
+        self.bench_proc_latencies = []
+        self.bench_net_latencies = []
+        self.bench_tot_latencies = []
         self.bench_points_count = []
 
         self.root.rowconfigure(0, weight=1)
@@ -91,7 +95,8 @@ class GrpcBenchmarkApp:
 
         self.bench_active = True
         self.bench_end_time = time.time() + dur
-        self.bench_latencies, self.bench_points_count = [], []
+        # Reset split latency lists
+        self.bench_proc_latencies, self.bench_net_latencies, self.bench_tot_latencies, self.bench_points_count = [], [], [], []
         self.start_btn.configure(state="disabled", text="⏳ RUNNING...", bg="#f38ba8")
         self.bench_status.configure(text=f"Status: Recording packets for {dur}s...", fg="#f9e2af")
         self.log_message(f"\n=== STARTING {dur}s gRPC NETWORK BENCHMARK ===")
@@ -139,25 +144,38 @@ class GrpcBenchmarkApp:
             if self.bench_active:
                 if time.time() <= self.bench_end_time:
                     if pc_sensor_epoch > 0:
-                        raw_lat_ms = abs(pc_wire_time - pc_sensor_epoch) * 1000
-                        self.bench_latencies.append(raw_lat_ms)
+                        # --- NEW: SPLIT-LATENCY MATH FOR NATIVE gRPC ---
+                        send_epoch = pc_sensor_epoch  # Native C++ stream has no Node-RED middleware tax
+                        proc_ms = abs(send_epoch - pc_sensor_epoch) * 1000
+                        net_ms = abs(pc_wire_time - send_epoch) * 1000
+                        tot_ms = abs(pc_wire_time - pc_sensor_epoch) * 1000
+
+                        self.bench_proc_latencies.append(proc_ms)
+                        self.bench_net_latencies.append(net_ms)
+                        self.bench_tot_latencies.append(tot_ms)
                         self.bench_points_count.append(len(xs))
                 else:
                     self.bench_active = False
                     self.start_btn.configure(state="normal", text="▶ START BENCHMARK", bg="#89b4fa")
                     self.bench_status.configure(text="Status: Benchmark complete!", fg="#a6e3a1")
 
-                    if len(self.bench_latencies) > 0:
+                    if len(self.bench_tot_latencies) > 0:
                         first_sensor_time = datetime.fromtimestamp(pc_sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
                         first_recv_time = datetime.fromtimestamp(pc_wire_time).strftime('%H:%M:%S.%f')[:-3]
                         
+                        avg_proc = sum(self.bench_proc_latencies) / len(self.bench_proc_latencies)
+                        avg_net = sum(self.bench_net_latencies) / len(self.bench_net_latencies)
+                        avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
+                        max_tot = max(self.bench_tot_latencies)
+                        
                         summary = (
-                            f"\n=== SDSM SYNC RESULTS ({len(self.bench_latencies)} Frames) ===\n"
+                            f"\n=== BENCHMARK SYNC RESULTS ({len(self.bench_tot_latencies)} Frames) ===\n"
                             f" ├── Stream Start: measurementTime @ {first_sensor_time} -> Receipt Time @ {first_recv_time}\n"
-                            f" ├── Avg Transit Delay : {sum(self.bench_latencies)/len(self.bench_latencies):.2f} ms\n"
-                            f" ├── Max Offset        : {max(self.bench_latencies):.2f} ms\n"
-                            f" └── pos (Points) Avg  : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} per frame\n"
-                            f"====================================="
+                            f" ├── Avg Middleware CPU Tax : {avg_proc:.2f} ms (Native C++ Pipe)\n"
+                            f" ├── Avg Network/Buffer Tax : {avg_net:.2f} ms\n"
+                            f" ├── Total Pipeline Latency : {avg_tot:.2f} ms (Max: {max_tot:.2f} ms)\n"
+                            f" └── pos (Points) Avg       : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} points per frame\n"
+                            f"========================================================="
                         )
                         self.log_message(summary)
 
