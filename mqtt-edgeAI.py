@@ -21,8 +21,8 @@ MQTT_TOPIC = "#"
 class MqttDashboardApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: MQTT Intrusion Monitor")
-        self.root.geometry("800x500")
+        self.root.title("Blickfeld: MQTT Intrusion Monitor (With Rate Limiter)")
+        self.root.geometry("850x580")
         self.root.configure(bg="#1e1e2e")
 
         self.packet_queue = queue.Queue()
@@ -32,9 +32,12 @@ class MqttDashboardApp:
         self.cached_subjects = []
         self.tree_items = {}
         
+        # --- NEW: THREAD-SAFE RATE LIMITING STATE ---
+        self.target_fps = None      # None = Unthrottled (Receive all messages)
+        self.last_proc_time = 0.0
 
-        self.root.rowconfigure(1, weight=1)
         self.root.rowconfigure(2, weight=1)
+        self.root.rowconfigure(3, weight=1)
         self.root.columnconfigure(0, weight=1)
 
         self._build_ui()
@@ -51,20 +54,29 @@ class MqttDashboardApp:
         style.configure("Treeview.Heading", background="#32324d", foreground="white", relief="flat")
         style.map("Treeview", background=[("selected", "#4c4f69")])
 
+        # --- NEW: CONTROL BAR FOR DYNAMIC RATE LIMITING ---
+        ctrl_frame = tk.Frame(self.root, bg="#252538", pady=8, padx=15)
+        ctrl_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=(10, 0))
+        
+        tk.Label(ctrl_frame, text="⚙️ Client-Side Rate Limit (FPS):", font=("Arial", 10, "bold"), bg="#252538", fg="white").pack(side=tk.LEFT, padx=5)
+        self.fps_entry = tk.Entry(ctrl_frame, width=6, font=("Consolas", 11, "bold"), bg="#181825", fg="#89b4fa", insertbackground="white")
+        self.fps_entry.insert(0, "")  # Default blank = receive all messages (unthrottled)
+        self.fps_entry.pack(side=tk.LEFT, padx=5)
+        tk.Label(ctrl_frame, text="*(Leave blank for unthrottled broker broadcast)*", font=("Arial", 9, "italic"), bg="#252538", fg="#a6adc8").pack(side=tk.LEFT, padx=10)
+
         # Status Banner
-        self.status_frame = tk.Frame(self.root, bg="#a6e3a1", height=80)
-        self.status_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=10)
+        self.status_frame = tk.Frame(self.root, bg="#a6e3a1", height=70)
+        self.status_frame.grid(row=1, column=0, sticky="ew", padx=15, pady=10)
         self.status_frame.grid_propagate(False)
         self.status_label = tk.Label(self.status_frame, text="SYSTEM SECURED - NO INTRUSIONS", font=("Arial", 16, "bold"), bg="#a6e3a1", fg="#11111b")
         self.status_label.pack(expand=True)
 
         # Subjects Table
         subjects_frame = tk.LabelFrame(self.root, text=" Tracked Subjects ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
-        subjects_frame.grid(row=1, column=0, sticky="nsew", padx=15, pady=5)
+        subjects_frame.grid(row=2, column=0, sticky="nsew", padx=15, pady=5)
         subjects_frame.rowconfigure(0, weight=1)
         subjects_frame.columnconfigure(0, weight=1)
 
-        # --- SDSM COMPLIANT SUBJECTS TABLE ---
         self.tree = ttk.Treeview(subjects_frame, columns=("objectID", "objType", "pos", "speed"), show="headings")
         self.tree.heading("objectID", text="objectID (Temp ID)")
         self.tree.heading("objType", text="objType & OptionalData")
@@ -83,7 +95,7 @@ class MqttDashboardApp:
 
         # Log
         perf_frame = tk.LabelFrame(self.root, text=" Telemetry Log ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
-        perf_frame.grid(row=2, column=0, sticky="nsew", padx=15, pady=10)
+        perf_frame.grid(row=3, column=0, sticky="nsew", padx=15, pady=10)
         perf_frame.rowconfigure(0, weight=1)
         perf_frame.columnconfigure(0, weight=1)
 
@@ -109,8 +121,15 @@ class MqttDashboardApp:
 
         def on_message(client, userdata, msg):
             try:
+                now = time.time()
+                # --- NEW: DRAIN AND DISCARD RATE LIMITER ---
+                if self.target_fps is not None and self.target_fps > 0:
+                    if (now - self.last_proc_time) < (1.0 / self.target_fps):
+                        return
+                        
+                self.last_proc_time = now
                 payload = json.loads(msg.payload.decode("utf-8"))
-                self.packet_queue.put(("MQTT", time.time(), payload))
+                self.packet_queue.put(("MQTT", now, payload))
             except Exception:
                 pass
 
@@ -127,6 +146,16 @@ class MqttDashboardApp:
             self.packet_queue.put(("LOG", f"MQTT ERROR: {str(e)}"))
 
     def _ui_consumer_tick(self):
+        # --- NEW: DYNAMICALLY READ RATE LIMIT FROM UI ---
+        val = self.fps_entry.get().strip()
+        if val:
+            try:
+                self.target_fps = float(val)
+            except ValueError:
+                self.target_fps = None
+        else:
+            self.target_fps = None
+
         latest_mqtt = None
         now = time.time()
 
@@ -154,7 +183,6 @@ class MqttDashboardApp:
                 except (ValueError, TypeError):
                     pass
 
-            # --- NEW: EXTRACT SENDING TIME & SPLIT-LATENCY MATH ---
             raw_send_ts = payload.get("send_time") or 0.0
             send_epoch = 0.0
             if raw_send_ts:
@@ -166,12 +194,11 @@ class MqttDashboardApp:
                     except (ValueError, TypeError): pass
 
             if sensor_epoch > 0 and send_epoch > 0:
-                proc_ms = abs(send_epoch - sensor_epoch) * 1000         # Node-RED processing / rate limit tax
-                net_ms = abs(wire_arrival_time - send_epoch) * 1000     # Wire / Broker delay
-                total_ms = abs(wire_arrival_time - sensor_epoch) * 1000 # Total Pipeline Speed
+                proc_ms = abs(send_epoch - sensor_epoch) * 1000
+                net_ms = abs(wire_arrival_time - send_epoch) * 1000
+                total_ms = abs(wire_arrival_time - sensor_epoch) * 1000
                 lat_str = f"Proc: {proc_ms:.1f}ms | Net: {net_ms:.1f}ms | Total: {total_ms:.1f}ms"
             elif sensor_epoch > 0:
-                # Fallback if send_time has not been added to Node-RED flow yet
                 total_ms = abs(wire_arrival_time - sensor_epoch) * 1000
                 lat_str = f"Total: {total_ms:.2f}ms (No send_time tag)"
             else:
@@ -212,13 +239,10 @@ class MqttDashboardApp:
                     send_time_str = datetime.fromtimestamp(send_epoch).strftime('%H:%M:%S.%f')[:-3] if send_epoch > 0 else "N/A"
                     recv_time_str = datetime.fromtimestamp(wire_arrival_time).strftime('%H:%M:%S.%f')[:-3]
                     
-                    # Extract all object IDs present in this frame
                     obj_ids = ", ".join([str(subj["objectID"]) for subj in incoming_intrusions])
-                    
-                    # --- NEW: LOG WITH TIMELINE AND DELAY BREAKDOWN ---
-                    self.log_message(f"SDSM INTRUSION [IDs: {obj_ids}] | Sense: {sensor_time_str} | Send: {send_time_str} | Recv: {recv_time_str} | Delay Breakdown -> {lat_str}")
+                    mode_str = f"Throttled ({self.target_fps} FPS)" if self.target_fps else "Unthrottled (Firehose)"
+                    self.log_message(f"SDSM INTRUSION [{mode_str}] | IDs: {obj_ids} | Sense: {sensor_time_str} ➔ Recv: {recv_time_str} | {lat_str}")
 
-        # UI Updates
         is_alarm = now < self.alarm_active_until
 
         if (now - self.last_ui_paint) >= UI_REFRESH_RATE_SEC:
@@ -230,7 +254,6 @@ class MqttDashboardApp:
                 self.status_frame.configure(bg=target_bg)
                 self.status_label.configure(bg=target_bg, text=master_threat)
 
-            # Historical Log Logic (Update existing, append new to top)
             if is_alarm:
                 for target in self.cached_subjects:
                     obj_id = str(target["objectID"])
@@ -242,7 +265,6 @@ class MqttDashboardApp:
                         item = self.tree.insert("", 0, values=vals)
                         self.tree_items[obj_id] = item
                         
-                    # Cap the UI log at 100 rows to prevent the app from freezing over long durations
                     if len(self.tree_items) > 100:
                         last_item = self.tree.get_children()[-1]
                         last_id = self.tree.item(last_item)["values"][0]
