@@ -147,9 +147,8 @@ class GrpcPcapBenchmarkApp:
         
         self.log_message(f"\n=== BENCHMARK STARTED ({dur}s) | Mode: {selected_mode} ===")
         
-        # If Auto-Capture mode is selected, start background packet sniffer
         if selected_mode == "Auto-Capture via Scapy":
-            self.log_message("▶ Auto-Capture: Sniffing gRPC packets on port 50051...")
+            self.log_message("▶ Auto-Capture: Sniffing gRPC packets from sensor...")
             threading.Thread(target=self._background_sniffer, args=(dur,), daemon=True).start()
         else:
             self.log_message("▶ Manual Mode: Keep Wireshark recording packets on your laptop now!")
@@ -157,7 +156,7 @@ class GrpcPcapBenchmarkApp:
     def _background_sniffer(self, timeout_sec):
         """ Captures raw packets in background using Scapy (requires Admin/root permissions) """
         try:
-            filter_str = f"tcp port {GRPC_PORT} and src host {LIDAR_IP}"
+            filter_str = f"tcp and src host {LIDAR_IP}"
             packets = sniff(filter=filter_str, timeout=timeout_sec)
             self.auto_sniffed_packets = packets
         except Exception as e:
@@ -171,22 +170,42 @@ class GrpcPcapBenchmarkApp:
         if file_path:
             threading.Thread(target=self._process_packets, args=(rdpcap(file_path), f"File: {file_path}"), daemon=True).start()
 
+    def _decode_varint(self, data, offset):
+        """ Decodes a Protobuf varint from raw bytes starting at a specific offset """
+        result = 0
+        shift = 0
+        for i in range(10):  # Varints are max 10 bytes for a 64-bit integer
+            if offset + i >= len(data):
+                return None
+            byte = data[offset + i]
+            result |= (byte & 0x7f) << shift
+            if not (byte & 0x80):
+                return result
+            shift += 7
+        return None
+
     def _extract_protobuf_timestamp(self, payload_bytes):
-        """ Scans raw gRPC byte payloads for nanosecond optical timestamps (> 1.6e18 ns) """
-        if len(payload_bytes) < 10:
+        """ Robustly scans raw byte payloads for nanosecond optical timestamps (> 1.6e18 ns) """
+        if len(payload_bytes) < 8:
             return None
             
-        data_bytes = payload_bytes[5:] if payload_bytes[0] == 0x00 else payload_bytes
-
-        for i in range(0, len(data_bytes) - 8, 4):
+        # Step by 1 byte (not 4!) to catch unaligned Protobuf tags and HTTP/2 headers
+        for i in range(len(payload_bytes) - 8):
             try:
-                val = struct.unpack(">Q", data_bytes[i:i+8])[0]  # Big-endian uint64
-                if 1_600_000_000_000_000_000 < val < 2_200_000_000_000_000_000:
-                    return val / 1e9
-                
-                val_le = struct.unpack("<Q", data_bytes[i:i+8])[0]  # Little-endian uint64
+                # 1. Check for Protobuf Varint encoding (standard uint64/int64 in .proto files)
+                val_varint = self._decode_varint(payload_bytes, i)
+                if val_varint and 1_600_000_000_000_000_000 < val_varint < 2_200_000_000_000_000_000:
+                    return val_varint / 1e9
+
+                # 2. Check for Little-Endian fixed64 (<Q)
+                val_le = struct.unpack("<Q", payload_bytes[i:i+8])[0]
                 if 1_600_000_000_000_000_000 < val_le < 2_200_000_000_000_000_000:
                     return val_le / 1e9
+
+                # 3. Check for Big-Endian fixed64 (>Q)
+                val_be = struct.unpack(">Q", payload_bytes[i:i+8])[0]
+                if 1_600_000_000_000_000_000 < val_be < 2_200_000_000_000_000_000:
+                    return val_be / 1e9
             except Exception:
                 continue
         return None
@@ -198,7 +217,8 @@ class GrpcPcapBenchmarkApp:
 
         for pkt in packets:
             if IP in pkt and TCP in pkt:
-                if pkt[IP].src == LIDAR_IP and pkt[TCP].sport == GRPC_PORT:
+                # Removed strict sport == GRPC_PORT check! Now checks ANY TCP packet from the sensor.
+                if pkt[IP].src == LIDAR_IP:
                     payload = bytes(pkt[TCP].payload)
                     if not payload:
                         continue
