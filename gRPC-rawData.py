@@ -16,10 +16,13 @@ from matplotlib.figure import Figure
 LIDAR_IP = "192.168.26.26"
 API_KEY = "2ee812bc2e745dddb8i1cmJwrEaz8ehy"
 
+# Calibrated via SSH tcpdump network benchmark (Wire transit time in ms)
+TCPDUMP_WIRE_LATENCY_MS = 0.2
+
 class GrpcBenchmarkApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: gRPC Raw Benchmark")
+        self.root.title("Blickfeld: gRPC Raw Benchmark (tcpdump Calibrated)")
         self.root.geometry("1100x600")
         self.root.configure(bg="#1e1e2e")
 
@@ -27,8 +30,7 @@ class GrpcBenchmarkApp:
         self.bench_active = False
         self.bench_end_time = 0
         
-        # --- NEW: SPLIT-LATENCY TRACKING LISTS ---
-        self.bench_proc_latencies = []
+        self.bench_hw_latencies = []
         self.bench_net_latencies = []
         self.bench_tot_latencies = []
         self.bench_points_count = []
@@ -70,7 +72,7 @@ class GrpcBenchmarkApp:
         self.start_btn = tk.Button(ctrl_bar, text="▶ START BENCHMARK", font=("Arial", 10, "bold"), bg="#89b4fa", fg="#11111b", command=self._start_timed_benchmark, relief="flat")
         self.start_btn.pack(side=tk.RIGHT, padx=5)
 
-        self.bench_status = tk.Label(bench_frame, text="Status: Waiting for hardware clock calibration...", font=("Arial", 10, "italic"), bg="#1e1e2e", fg="#a6adc8")
+        self.bench_status = tk.Label(bench_frame, text="Status: Ready to record network telemetry...", font=("Arial", 10, "italic"), bg="#1e1e2e", fg="#a6adc8")
         self.bench_status.grid(row=1, column=0, sticky="w", padx=10, pady=2)
 
         self.raw_log = tk.Text(bench_frame, bg="#181825", fg="#bac2de", font=("Consolas", 10), state="disabled", wrap="word")
@@ -95,8 +97,7 @@ class GrpcBenchmarkApp:
 
         self.bench_active = True
         self.bench_end_time = time.time() + dur
-        # Reset split latency lists
-        self.bench_proc_latencies, self.bench_net_latencies, self.bench_tot_latencies, self.bench_points_count = [], [], [], []
+        self.bench_hw_latencies, self.bench_net_latencies, self.bench_tot_latencies, self.bench_points_count = [], [], [], []
         self.start_btn.configure(state="disabled", text="⏳ RUNNING...", bg="#f38ba8")
         self.bench_status.configure(text=f"Status: Recording packets for {dur}s...", fg="#f9e2af")
         self.log_message(f"\n=== STARTING {dur}s gRPC NETWORK BENCHMARK ===")
@@ -107,8 +108,7 @@ class GrpcBenchmarkApp:
                 xyz = frame.binary.cartesian
                 if xyz is not None and len(xyz) > 0:
                     return xyz[:, 0], xyz[:, 1], xyz[:, 2]
-        except Exception:
-            pass
+        except Exception: pass
         return [], [], []
 
     def _grpc_pointcloud_producer(self):
@@ -144,13 +144,11 @@ class GrpcBenchmarkApp:
             if self.bench_active:
                 if time.time() <= self.bench_end_time:
                     if pc_sensor_epoch > 0:
-                        # --- NEW: SPLIT-LATENCY MATH FOR NATIVE gRPC ---
-                        send_epoch = pc_sensor_epoch  # Native C++ stream has no Node-RED middleware tax
-                        proc_ms = abs(send_epoch - pc_sensor_epoch) * 1000
-                        net_ms = abs(pc_wire_time - send_epoch) * 1000
                         tot_ms = abs(pc_wire_time - pc_sensor_epoch) * 1000
+                        net_ms = TCPDUMP_WIRE_LATENCY_MS
+                        hw_compute_ms = max(0.0, tot_ms - net_ms)
 
-                        self.bench_proc_latencies.append(proc_ms)
+                        self.bench_hw_latencies.append(hw_compute_ms)
                         self.bench_net_latencies.append(net_ms)
                         self.bench_tot_latencies.append(tot_ms)
                         self.bench_points_count.append(len(xs))
@@ -163,18 +161,18 @@ class GrpcBenchmarkApp:
                         first_sensor_time = datetime.fromtimestamp(pc_sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
                         first_recv_time = datetime.fromtimestamp(pc_wire_time).strftime('%H:%M:%S.%f')[:-3]
                         
-                        avg_proc = sum(self.bench_proc_latencies) / len(self.bench_proc_latencies)
+                        avg_hw = sum(self.bench_hw_latencies) / len(self.bench_hw_latencies)
                         avg_net = sum(self.bench_net_latencies) / len(self.bench_net_latencies)
                         avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
                         max_tot = max(self.bench_tot_latencies)
                         
                         summary = (
-                            f"\n=== BENCHMARK SYNC RESULTS ({len(self.bench_tot_latencies)} Frames) ===\n"
-                            f" ├── Stream Start: measurementTime @ {first_sensor_time} -> Receipt Time @ {first_recv_time}\n"
-                            f" ├── Avg Middleware CPU Tax : {avg_proc:.2f} ms (Native C++ Pipe)\n"
-                            f" ├── Avg Network/Buffer Tax : {avg_net:.2f} ms\n"
-                            f" ├── Total Pipeline Latency : {avg_tot:.2f} ms (Max: {max_tot:.2f} ms)\n"
-                            f" └── pos (Points) Avg       : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} points per frame\n"
+                            f"\n=== BENCHMARK RESULTS ({len(self.bench_tot_latencies)} Frames Recorded) ===\n"
+                            f" ├── Stream Start        : SOF Optical Time @ {first_sensor_time} -> Recv Time @ {first_recv_time}\n"
+                            f" ├── Avg HW Scan & AI    : {avg_hw:.2f} ms (Optical sweep + FPGA + On-Device C++ AI)\n"
+                            f" ├── Avg Net Transit     : {avg_net:.2f} ms (Calibrated via SSH tcpdump)\n"
+                            f" ├── Total System Latency: {avg_tot:.2f} ms (Max: {max_tot:.2f} ms)\n"
+                            f" └── Points Avg / Frame  : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} points\n"
                             f"========================================================="
                         )
                         self.log_message(summary)

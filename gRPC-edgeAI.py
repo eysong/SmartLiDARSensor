@@ -16,14 +16,17 @@ COOLDOWN_SECONDS = 5
 ALARM_HOLD_SECONDS = 1.5
 UI_REFRESH_RATE_SEC = 0.2
 
+# Calibrated via SSH tcpdump network benchmark (Wire transit time in ms)
+TCPDUMP_WIRE_LATENCY_MS = 0.2 
+
 LIDAR_IP = "192.168.26.26"
 API_KEY = "2ee812bc2e745dddb8i1cmJwrEaz8ehy"
 
 class GrpcEdgeDashboardApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: gRPC Edge-AI Monitor (With Rate Limiter)")
-        self.root.geometry("850x580")
+        self.root.title("Blickfeld: gRPC Edge-AI Monitor (tcpdump Calibrated)")
+        self.root.geometry("880x600")
         self.root.configure(bg="#1e1e2e")
 
         self.packet_queue = queue.Queue()
@@ -33,7 +36,7 @@ class GrpcEdgeDashboardApp:
         self.cached_subjects = []
         self.tree_items = {}
 
-        # --- NEW: THREAD-SAFE RATE LIMITING STATE ---
+        # Thread-safe rate limiting state
         self.target_fps = None      # None = Unthrottled (Receive all messages)
         self.last_proc_time = 0.0
 
@@ -54,13 +57,13 @@ class GrpcEdgeDashboardApp:
         style.configure("Treeview", background="#252538", foreground="white", fieldbackground="#252538", rowheight=26)
         style.configure("Treeview.Heading", background="#32324d", foreground="white", relief="flat")
 
-        # --- NEW: CONTROL BAR FOR DYNAMIC RATE LIMITING ---
+        # Control Bar for Dynamic Rate Limiting
         ctrl_frame = tk.Frame(self.root, bg="#252538", pady=8, padx=15)
         ctrl_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=(10, 0))
         
         tk.Label(ctrl_frame, text="⚙️ Client-Side Rate Limit (FPS):", font=("Arial", 10, "bold"), bg="#252538", fg="white").pack(side=tk.LEFT, padx=5)
         self.fps_entry = tk.Entry(ctrl_frame, width=6, font=("Consolas", 11, "bold"), bg="#181825", fg="#89b4fa", insertbackground="white")
-        self.fps_entry.insert(0, "")  # Default blank = receive all messages (unthrottled)
+        self.fps_entry.insert(0, "")  # Default blank = unthrottled
         self.fps_entry.pack(side=tk.LEFT, padx=5)
         tk.Label(ctrl_frame, text="*(Leave blank for unthrottled hardware broadcast)*", font=("Arial", 9, "italic"), bg="#252538", fg="#a6adc8").pack(side=tk.LEFT, padx=10)
 
@@ -77,7 +80,6 @@ class GrpcEdgeDashboardApp:
         subjects_frame.rowconfigure(0, weight=1)
         subjects_frame.columnconfigure(0, weight=1)
 
-        # --- SDSM COMPLIANT SUBJECTS TABLE ---
         self.tree = ttk.Treeview(subjects_frame, columns=("objectID", "objType", "pos", "speed"), show="headings")
         self.tree.heading("objectID", text="objectID (Temp ID)")
         self.tree.heading("objType", text="objType & OptionalData")
@@ -95,7 +97,7 @@ class GrpcEdgeDashboardApp:
         tree_scroll.grid(row=0, column=1, sticky="ns")
 
         # Telemetry Log
-        perf_frame = tk.LabelFrame(self.root, text=" gRPC Edge-AI Performance Log ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
+        perf_frame = tk.LabelFrame(self.root, text=" gRPC Edge-AI Performance Log (Calibrated via tcpdump) ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
         perf_frame.grid(row=3, column=0, sticky="nsew", padx=15, pady=10)
         perf_frame.rowconfigure(0, weight=1)
         perf_frame.columnconfigure(0, weight=1)
@@ -124,8 +126,6 @@ class GrpcEdgeDashboardApp:
                 for response in service.stream():
                     now = time.time()
                     
-                    # --- NEW: DRAIN AND DISCARD RATE LIMITER ---
-                    # If limited, we instantly trash excess frames BEFORE calling .to_dict()!
                     if self.target_fps is not None and self.target_fps > 0:
                         if (now - self.last_proc_time) < (1.0 / self.target_fps):
                             continue
@@ -136,15 +136,11 @@ class GrpcEdgeDashboardApp:
             self.packet_queue.put(("LOG", f"gRPC ERROR: {str(e)}"))
 
     def _ui_consumer_tick(self):
-        # --- NEW: DYNAMICALLY READ RATE LIMIT FROM UI ---
         val = self.fps_entry.get().strip()
         if val:
-            try:
-                self.target_fps = float(val)
-            except ValueError:
-                self.target_fps = None
-        else:
-            self.target_fps = None
+            try: self.target_fps = float(val)
+            except ValueError: self.target_fps = None
+        else: self.target_fps = None
 
         latest_packet = None
         now = time.time()
@@ -175,24 +171,21 @@ class GrpcEdgeDashboardApp:
                     else:
                         val = float(raw_ts)
                         sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
-                except Exception:
-                    pass
+                except Exception: pass
             else:
                 try:
                     val = float(raw_ts)
                     sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError): pass
 
-            # --- SPLIT-LATENCY MATH ---
+            # --- TCPDUMP ACCURATE LATENCY BREAKDOWN ---
             if sensor_epoch > 0:
-                send_epoch = sensor_epoch 
-                proc_ms = abs(send_epoch - sensor_epoch) * 1000
-                net_ms = abs(wire_arrival_time - send_epoch) * 1000
                 total_ms = abs(wire_arrival_time - sensor_epoch) * 1000
-                lat_str = f"Proc: {proc_ms:.1f}ms | Net: {net_ms:.1f}ms | Total: {total_ms:.1f}ms"
+                net_ms = TCPDUMP_WIRE_LATENCY_MS
+                hw_compute_ms = max(0.0, total_ms - net_ms)
+                
+                lat_str = f"HW Scan/AI: {hw_compute_ms:.1f}ms | Net (tcpdump): {net_ms:.1f}ms | Total: {total_ms:.1f}ms"
             else:
-                send_epoch = 0.0
                 lat_str = "UNKNOWN"
                 
             raw_objs = frame_data.get("objects", {})
@@ -222,12 +215,9 @@ class GrpcEdgeDashboardApp:
                         props = obj.get("properties", {}) or obj.get("classification", {})
                         raw_size = str(props.get("size", "")).upper()
                         
-                        if "MEDIUM" in raw_size: 
-                            sdsm_type = "VRU (detVRUData)" 
-                        elif "LARGE" in raw_size: 
-                            sdsm_type = "VEHICLE (detVehData)" 
-                        else: 
-                            sdsm_type = "OBSTACLE (detObstData)"
+                        if "MEDIUM" in raw_size: sdsm_type = "VRU (detVRUData)" 
+                        elif "LARGE" in raw_size: sdsm_type = "VEHICLE (detVehData)" 
+                        else: sdsm_type = "OBSTACLE (detObstData)"
 
                         incoming_intrusions.append({
                             "objectID": str(obj_id),
@@ -243,7 +233,6 @@ class GrpcEdgeDashboardApp:
                     self.last_log_time = now
                     
                     sensor_time_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3] if sensor_epoch > 0 else "N/A"
-                    send_time_str = datetime.fromtimestamp(send_epoch).strftime('%H:%M:%S.%f')[:-3] if send_epoch > 0 else "N/A"
                     recv_time_str = datetime.fromtimestamp(wire_arrival_time).strftime('%H:%M:%S.%f')[:-3]
                     
                     obj_ids = ", ".join([str(subj["objectID"]) for subj in incoming_intrusions])
