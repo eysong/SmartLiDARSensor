@@ -1,5 +1,6 @@
 import asyncio
 import queue
+import socket
 import threading
 import time
 from datetime import datetime
@@ -15,20 +16,21 @@ from matplotlib.figure import Figure
 # ==========================================
 LIDAR_IP = "192.168.26.26"
 API_KEY = "2ee812bc2e745dddb8i1cmJwrEaz8ehy"
-
-# Calibrated via SSH tcpdump network benchmark (Wire transit time in ms to 3 decimal places)
-TCPDUMP_WIRE_LATENCY_MS = 0.200
+PROBE_PORT = 50051  # Target the Blickfeld gRPC service socket directly
 
 class GrpcBenchmarkApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: gRPC Raw Benchmark (Microsecond Precision)")
+        self.root.title("Blickfeld: gRPC Raw Benchmark (Empirical TCP Probe)")
         self.root.geometry("1100x600")
         self.root.configure(bg="#1e1e2e")
 
         self.packet_queue = queue.Queue()
         self.bench_active = False
         self.bench_end_time = 0
+        
+        # Live empirical network state (No hardcoded variables!)
+        self.live_wire_latency_ms = 0.000 
         
         self.bench_hw_latencies = []
         self.bench_net_latencies = []
@@ -41,8 +43,9 @@ class GrpcBenchmarkApp:
 
         self._build_ui()
 
-        self.pointcloud_thread = threading.Thread(target=self._grpc_pointcloud_producer, daemon=True)
-        self.pointcloud_thread.start()
+        # Start both the 3D point cloud stream and the live wire probe
+        threading.Thread(target=self._grpc_pointcloud_producer, daemon=True).start()
+        threading.Thread(target=self._wire_latency_probe, daemon=True).start()
 
         self.root.after(100, self._ui_consumer_tick)
 
@@ -64,13 +67,16 @@ class GrpcBenchmarkApp:
         ctrl_bar = tk.Frame(bench_frame, bg="#252538", pady=10, padx=10)
         ctrl_bar.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
 
-        tk.Label(ctrl_bar, text="Duration (sec):", font=("Arial", 10, "bold"), bg="#252538", fg="white").pack(side=tk.LEFT, padx=5)
-        self.dur_entry = tk.Entry(ctrl_bar, width=6, font=("Consolas", 11, "bold"), bg="#181825", fg="#89b4fa", insertbackground="white")
+        tk.Label(ctrl_bar, text="Duration (s):", font=("Arial", 10, "bold"), bg="#252538", fg="white").pack(side=tk.LEFT, padx=5)
+        self.dur_entry = tk.Entry(ctrl_bar, width=5, font=("Consolas", 11, "bold"), bg="#181825", fg="#89b4fa", insertbackground="white")
         self.dur_entry.insert(0, "10")
         self.dur_entry.pack(side=tk.LEFT, padx=5)
 
-        self.start_btn = tk.Button(ctrl_bar, text="▶ START BENCHMARK", font=("Arial", 10, "bold"), bg="#89b4fa", fg="#11111b", command=self._start_timed_benchmark, relief="flat")
-        self.start_btn.pack(side=tk.RIGHT, padx=5)
+        self.start_btn = tk.Button(ctrl_bar, text="▶ START", font=("Arial", 10, "bold"), bg="#89b4fa", fg="#11111b", command=self._start_timed_benchmark, relief="flat")
+        self.start_btn.pack(side=tk.LEFT, padx=10)
+        
+        self.wire_status_lbl = tk.Label(ctrl_bar, text="📡 Wire Speed: Probing...", font=("Consolas", 9, "bold"), bg="#252538", fg="#f9e2af")
+        self.wire_status_lbl.pack(side=tk.RIGHT, padx=5)
 
         self.bench_status = tk.Label(bench_frame, text="Status: Ready to record network telemetry...", font=("Arial", 10, "italic"), bg="#1e1e2e", fg="#a6adc8")
         self.bench_status.grid(row=1, column=0, sticky="w", padx=10, pady=2)
@@ -86,6 +92,21 @@ class GrpcBenchmarkApp:
         self.raw_log.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}\n")
         self.raw_log.see(tk.END)
         self.raw_log.configure(state="disabled")
+
+    def _wire_latency_probe(self):
+        """ Dynamically measures real Ethernet wire speed every 1s using TCP handshakes """
+        while True:
+            try:
+                start_t = time.perf_counter()
+                with socket.create_connection((LIDAR_IP, PROBE_PORT), timeout=1.0):
+                    pass
+                rtt_ms = (time.perf_counter() - start_t) * 1000
+                # One-way wire latency is half of the TCP Round Trip Time
+                self.live_wire_latency_ms = rtt_ms / 2.0
+                self.wire_status_lbl.configure(text=f"📡 Wire Speed: {self.live_wire_latency_ms:.3f} ms", fg="#a6e3a1")
+            except Exception:
+                self.wire_status_lbl.configure(text="📡 Wire Speed: Probe Timeout", fg="#f38ba8")
+            time.sleep(1.0)
 
     def _start_timed_benchmark(self):
         if self.bench_active:
@@ -145,7 +166,9 @@ class GrpcBenchmarkApp:
                 if time.time() <= self.bench_end_time:
                     if pc_sensor_epoch > 0:
                         tot_ms = abs(pc_wire_time - pc_sensor_epoch) * 1000
-                        net_ms = TCPDUMP_WIRE_LATENCY_MS
+                        
+                        # USES LIVE EMPIRICAL WIRE SPEED INSTEAD OF A STATIC CONSTANT!
+                        net_ms = self.live_wire_latency_ms
                         hw_compute_ms = max(0.0, tot_ms - net_ms)
 
                         self.bench_hw_latencies.append(hw_compute_ms)
@@ -154,7 +177,7 @@ class GrpcBenchmarkApp:
                         self.bench_points_count.append(len(xs))
                 else:
                     self.bench_active = False
-                    self.start_btn.configure(state="normal", text="▶ START BENCHMARK", bg="#89b4fa")
+                    self.start_btn.configure(state="normal", text="▶ START", bg="#89b4fa")
                     self.bench_status.configure(text="Status: Benchmark complete!", fg="#a6e3a1")
 
                     if len(self.bench_tot_latencies) > 0:
@@ -166,12 +189,11 @@ class GrpcBenchmarkApp:
                         avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
                         max_tot = max(self.bench_tot_latencies)
                         
-                        # Upgraded to .3f for microsecond statistical analysis
                         summary = (
                             f"\n=== BENCHMARK RESULTS ({len(self.bench_tot_latencies)} Frames Recorded) ===\n"
                             f" ├── Stream Start        : SOF Optical Time @ {first_sensor_time} -> Recv Time @ {first_recv_time}\n"
-                            f" ├── Avg HW Scan & AI    : {avg_hw:.3f} ms (Optical sweep + FPGA + On-Device C++ AI)\n"
-                            f" ├── Avg Net Transit     : {avg_net:.3f} ms (Calibrated via SSH tcpdump)\n"
+                            f" ├── Avg HW Scan & AI    : {avg_hw:.3f} ms (Optical sweep + FPGA + Core Processing)\n"
+                            f" ├── Avg Net Transit     : {avg_net:.3f} ms (Empirical via TCP port 50051 probe)\n"
                             f" ├── Total System Latency: {avg_tot:.3f} ms (Max: {max_tot:.3f} ms)\n"
                             f" └── Points Avg / Frame  : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} points\n"
                             f"========================================================="
