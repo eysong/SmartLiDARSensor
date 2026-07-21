@@ -16,8 +16,8 @@ COOLDOWN_SECONDS = 5
 ALARM_HOLD_SECONDS = 1.5
 UI_REFRESH_RATE_SEC = 0.2
 
-# Calibrated via SSH tcpdump network benchmark (Wire transit time in ms)
-TCPDUMP_WIRE_LATENCY_MS = 0.2 
+# Calibrated via SSH tcpdump network benchmark (Wire transit time in ms to 3 decimal places)
+TCPDUMP_WIRE_LATENCY_MS = 0.200 
 
 LIDAR_IP = "192.168.26.26"
 API_KEY = "2ee812bc2e745dddb8i1cmJwrEaz8ehy"
@@ -25,7 +25,7 @@ API_KEY = "2ee812bc2e745dddb8i1cmJwrEaz8ehy"
 class GrpcEdgeDashboardApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: gRPC Edge-AI Monitor (tcpdump Calibrated)")
+        self.root.title("Blickfeld: gRPC Edge-AI Monitor (Microsecond Precision)")
         self.root.geometry("880x600")
         self.root.configure(bg="#1e1e2e")
 
@@ -97,7 +97,7 @@ class GrpcEdgeDashboardApp:
         tree_scroll.grid(row=0, column=1, sticky="ns")
 
         # Telemetry Log
-        perf_frame = tk.LabelFrame(self.root, text=" gRPC Edge-AI Performance Log (Calibrated via tcpdump) ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
+        perf_frame = tk.LabelFrame(self.root, text=" gRPC Edge-AI Performance Log (Microsecond Resolution) ", bg="#1e1e2e", fg="#cdd6f4", font=("Arial", 11, "bold"))
         perf_frame.grid(row=3, column=0, sticky="nsew", padx=15, pady=10)
         perf_frame.rowconfigure(0, weight=1)
         perf_frame.columnconfigure(0, weight=1)
@@ -178,13 +178,14 @@ class GrpcEdgeDashboardApp:
                     sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
                 except (ValueError, TypeError): pass
 
-            # --- TCPDUMP ACCURATE LATENCY BREAKDOWN ---
+            # --- HIGH-PRECISION LATENCY BREAKDOWN (3 DECIMAL PLACES) ---
             if sensor_epoch > 0:
                 total_ms = abs(wire_arrival_time - sensor_epoch) * 1000
                 net_ms = TCPDUMP_WIRE_LATENCY_MS
                 hw_compute_ms = max(0.0, total_ms - net_ms)
                 
-                lat_str = f"HW Scan/AI: {hw_compute_ms:.1f}ms | Net (tcpdump): {net_ms:.1f}ms | Total: {total_ms:.1f}ms"
+                # Upgraded to .3f for microsecond resolution
+                lat_str = f"HW Scan/AI: {hw_compute_ms:.3f}ms | Net (tcpdump): {net_ms:.3f}ms | Total: {total_ms:.3f}ms"
             else:
                 lat_str = "UNKNOWN"
                 

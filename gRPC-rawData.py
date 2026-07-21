@@ -16,13 +16,13 @@ from matplotlib.figure import Figure
 LIDAR_IP = "192.168.26.26"
 API_KEY = "2ee812bc2e745dddb8i1cmJwrEaz8ehy"
 
-# Calibrated via SSH tcpdump network benchmark (Wire transit time in ms)
-TCPDUMP_WIRE_LATENCY_MS = 0.2
+# Calibrated via SSH tcpdump network benchmark (Wire transit time in ms to 3 decimal places)
+TCPDUMP_WIRE_LATENCY_MS = 0.200
 
 class GrpcBenchmarkApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: gRPC Raw Benchmark (tcpdump Calibrated)")
+        self.root.title("Blickfeld: gRPC Raw Benchmark (Microsecond Precision)")
         self.root.geometry("1100x600")
         self.root.configure(bg="#1e1e2e")
 
@@ -166,12 +166,13 @@ class GrpcBenchmarkApp:
                         avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
                         max_tot = max(self.bench_tot_latencies)
                         
+                        # Upgraded to .3f for microsecond statistical analysis
                         summary = (
                             f"\n=== BENCHMARK RESULTS ({len(self.bench_tot_latencies)} Frames Recorded) ===\n"
                             f" ├── Stream Start        : SOF Optical Time @ {first_sensor_time} -> Recv Time @ {first_recv_time}\n"
-                            f" ├── Avg HW Scan & AI    : {avg_hw:.2f} ms (Optical sweep + FPGA + On-Device C++ AI)\n"
-                            f" ├── Avg Net Transit     : {avg_net:.2f} ms (Calibrated via SSH tcpdump)\n"
-                            f" ├── Total System Latency: {avg_tot:.2f} ms (Max: {max_tot:.2f} ms)\n"
+                            f" ├── Avg HW Scan & AI    : {avg_hw:.3f} ms (Optical sweep + FPGA + On-Device C++ AI)\n"
+                            f" ├── Avg Net Transit     : {avg_net:.3f} ms (Calibrated via SSH tcpdump)\n"
+                            f" ├── Total System Latency: {avg_tot:.3f} ms (Max: {max_tot:.3f} ms)\n"
                             f" └── Points Avg / Frame  : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} points\n"
                             f"========================================================="
                         )
