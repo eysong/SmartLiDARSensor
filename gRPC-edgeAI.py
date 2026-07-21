@@ -9,6 +9,8 @@ import tkinter as tk
 from tkinter import ttk
 import blickfeld_qb2
 
+# result: [16:18:53.120] SDSM INTRUSION | IDs: 6148 | Sense: 16:18:52.239 ➔ Recv: 16:18:53.014 | HW Scan/AI: 775.020 ms | Net (TCP Probe): 0.290 ms | Total: 775.310 ms
+
 # ==========================================
 # --- CONFIGURATION ---
 # ==========================================
@@ -19,7 +21,7 @@ UI_REFRESH_RATE_SEC = 0.2
 
 LIDAR_IP = "192.168.26.26"
 API_KEY = "2ee812bc2e745dddb8i1cmJwrEaz8ehy"
-PROBE_PORT = 80  # Probes the sensor's hardware HTTP port for clean wire RTT
+PROBE_PORT = 50051  # Probes the sensor's hardware HTTP port for clean wire RTT
 
 class GrpcTrueWireDashboard:
     def __init__(self, root):
