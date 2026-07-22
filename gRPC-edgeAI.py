@@ -192,7 +192,13 @@ class GrpcTrueWireDashboard:
 
         if latest_packet:
             _, wire_arrival_time, frame_data, byte_size = latest_packet
-            raw_ts = (frame_data.get("timestamp") or frame_data.get("frame", {}).get("timestamp") or 0.0)
+            raw_ts = (
+                frame_data.get("timestamp") or
+                frame_data.get("frame", {}).get("timestamp") or
+                frame_data.get("objects", {}).get("timestamp") or
+                frame_data.get("objects", {}).get("metadata", {}).get("timestamp") or
+                0.0
+            )
 
             sensor_epoch = 0.0
             if isinstance(raw_ts, str):
