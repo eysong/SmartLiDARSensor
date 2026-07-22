@@ -154,14 +154,30 @@ class MqttRawBenchmarkApp:
             xs, ys, zs = payload.get("x", []), payload.get("y", []), payload.get("z", [])
             self.cached_xyz = (xs, ys, zs)
 
-            raw_ts = payload.get("timestamp", 0.0)
+            raw_ts = (
+                frame_data.get("timestamp") or
+                frame_data.get("frame", {}).get("timestamp") or
+                frame_data.get("objects", {}).get("timestamp") or
+                frame_data.get("objects", {}).get("metadata", {}).get("timestamp") or
+                0.0
+            )
+
             sensor_epoch = 0.0
             if isinstance(raw_ts, str):
-                try: sensor_epoch = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp() if "T" in raw_ts else float(raw_ts) / 1e9
-                except Exception: pass
-            else:
-                try: sensor_epoch = float(raw_ts) / 1e9 if float(raw_ts) > 1e16 else (float(raw_ts) / 1e3 if float(raw_ts) > 1e10 else float(raw_ts))
-                except (ValueError, TypeError): pass
+                try:
+                    if "T" in raw_ts:
+                        sensor_epoch = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+                    else:
+                        val = float(raw_ts)
+                        sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
+                except Exception:
+                    pass
+            elif isinstance(raw_ts, (int, float)):
+                try:
+                    val = float(raw_ts)
+                    sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
+                except Exception:
+                    pass
 
             raw_send_ts = payload.get("send_time", 0.0)
             send_epoch = 0.0
