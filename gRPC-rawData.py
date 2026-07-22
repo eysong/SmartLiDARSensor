@@ -1,4 +1,5 @@
 import asyncio
+import math
 import queue
 import socket
 import threading
@@ -21,21 +22,23 @@ PROBE_PORT = 50051  # Target the Blickfeld gRPC service socket directly
 class GrpcBenchmarkApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: gRPC Raw Benchmark (Empirical TCP Probe)")
+        self.root.title("Blickfeld: gRPC Raw Benchmark (Empirical TCP Probe + Advanced Telemetry)")
         self.root.geometry("1100x600")
         self.root.configure(bg="#1e1e2e")
 
         self.packet_queue = queue.Queue()
         self.bench_active = False
         self.bench_end_time = 0
-        
-        # Live empirical network state (No hardcoded variables!)
         self.live_wire_latency_ms = 0.000 
         
         self.bench_hw_latencies = []
         self.bench_net_latencies = []
         self.bench_tot_latencies = []
         self.bench_points_count = []
+        
+        self.bench_bytes_received = 0
+        self.bench_skipped_frames = 0
+        self.last_sensor_epoch = 0.0
 
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=3)
@@ -43,7 +46,6 @@ class GrpcBenchmarkApp:
 
         self._build_ui()
 
-        # Start both the 3D point cloud stream and the live wire probe
         threading.Thread(target=self._grpc_pointcloud_producer, daemon=True).start()
         threading.Thread(target=self._wire_latency_probe, daemon=True).start()
 
@@ -93,15 +95,18 @@ class GrpcBenchmarkApp:
         self.raw_log.see(tk.END)
         self.raw_log.configure(state="disabled")
 
+    def _calc_jitter(self, latencies):
+        if len(latencies) < 2: return 0.0
+        avg = sum(latencies) / len(latencies)
+        variance = sum((x - avg) ** 2 for x in latencies) / len(latencies)
+        return math.sqrt(variance)
+
     def _wire_latency_probe(self):
-        """ Dynamically measures real Ethernet wire speed every 1s using TCP handshakes """
         while True:
             try:
                 start_t = time.perf_counter()
-                with socket.create_connection((LIDAR_IP, PROBE_PORT), timeout=1.0):
-                    pass
+                with socket.create_connection((LIDAR_IP, PROBE_PORT), timeout=1.0): pass
                 rtt_ms = (time.perf_counter() - start_t) * 1000
-                # One-way wire latency is half of the TCP Round Trip Time
                 self.live_wire_latency_ms = rtt_ms / 2.0
                 self.wire_status_lbl.configure(text=f"📡 Wire Speed: {self.live_wire_latency_ms:.3f} ms", fg="#a6e3a1")
             except Exception:
@@ -109,19 +114,19 @@ class GrpcBenchmarkApp:
             time.sleep(1.0)
 
     def _start_timed_benchmark(self):
-        if self.bench_active:
-            return
-        try:
-            dur = float(self.dur_entry.get())
-        except ValueError:
-            return
+        if self.bench_active: return
+        try: dur = float(self.dur_entry.get())
+        except ValueError: return
 
         self.bench_active = True
         self.bench_end_time = time.time() + dur
         self.bench_hw_latencies, self.bench_net_latencies, self.bench_tot_latencies, self.bench_points_count = [], [], [], []
+        self.bench_bytes_received, self.bench_skipped_frames = 0, 0
+        self.last_sensor_epoch = 0.0
+        
         self.start_btn.configure(state="disabled", text="⏳ RUNNING...", bg="#f38ba8")
         self.bench_status.configure(text=f"Status: Recording packets for {dur}s...", fg="#f9e2af")
-        self.log_message(f"\n=== STARTING {dur}s gRPC NETWORK BENCHMARK ===")
+        self.log_message(f"\n=== STARTING {dur}s ADVANCED gRPC POINT CLOUD BENCHMARK ===")
 
     def _extract_xyz(self, frame):
         try:
@@ -141,22 +146,20 @@ class GrpcBenchmarkApp:
                 service = blickfeld_qb2.core_processing.services.PointCloud(channel)
                 self.packet_queue.put(("LOG", "ONLINE: Connected to gRPC Raw Point Cloud stream"))
                 for response in service.stream():
-                    self.packet_queue.put(("PC", time.time(), response.frame))
+                    frame_bytes = getattr(response.frame, "ByteSize", lambda: len(response.frame.binary.cartesian) * 16)()
+                    self.packet_queue.put(("PC", time.time(), response.frame, frame_bytes))
         except Exception as e:
             self.packet_queue.put(("LOG", f"gRPC ERROR: {str(e)}"))
 
     def _ui_consumer_tick(self):
         latest_pc = None
-
         while not self.packet_queue.empty():
             item = self.packet_queue.get_nowait()
-            if item[0] == "LOG":
-                self.log_message(item[1])
-            elif item[0] == "PC":
-                latest_pc = item
+            if item[0] == "LOG": self.log_message(item[1])
+            elif item[0] == "PC": latest_pc = item
 
         if latest_pc:
-            _, pc_wire_time, pc_frame = latest_pc
+            _, pc_wire_time, pc_frame, frame_bytes = latest_pc
             xs, ys, zs = self._extract_xyz(pc_frame)
 
             raw_ts = getattr(pc_frame, "timestamp", None) or 0.0
@@ -166,8 +169,6 @@ class GrpcBenchmarkApp:
                 if time.time() <= self.bench_end_time:
                     if pc_sensor_epoch > 0:
                         tot_ms = abs(pc_wire_time - pc_sensor_epoch) * 1000
-                        
-                        # USES LIVE EMPIRICAL WIRE SPEED INSTEAD OF A STATIC CONSTANT!
                         net_ms = self.live_wire_latency_ms
                         hw_compute_ms = max(0.0, tot_ms - net_ms)
 
@@ -175,28 +176,43 @@ class GrpcBenchmarkApp:
                         self.bench_net_latencies.append(net_ms)
                         self.bench_tot_latencies.append(tot_ms)
                         self.bench_points_count.append(len(xs))
+                        self.bench_bytes_received += frame_bytes
+                        
+                        if self.last_sensor_epoch > 0 and (pc_sensor_epoch - self.last_sensor_epoch) > 0.180:
+                            self.bench_skipped_frames += 1
+                        self.last_sensor_epoch = pc_sensor_epoch
                 else:
                     self.bench_active = False
                     self.start_btn.configure(state="normal", text="▶ START", bg="#89b4fa")
                     self.bench_status.configure(text="Status: Benchmark complete!", fg="#a6e3a1")
 
                     if len(self.bench_tot_latencies) > 0:
+                        dur_actual = float(self.dur_entry.get())
                         first_sensor_time = datetime.fromtimestamp(pc_sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
                         first_recv_time = datetime.fromtimestamp(pc_wire_time).strftime('%H:%M:%S.%f')[:-3]
                         
                         avg_hw = sum(self.bench_hw_latencies) / len(self.bench_hw_latencies)
                         avg_net = sum(self.bench_net_latencies) / len(self.bench_net_latencies)
                         avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
-                        max_tot = max(self.bench_tot_latencies)
+                        
+                        hw_jitter = self._calc_jitter(self.bench_hw_latencies)
+                        net_jitter = self._calc_jitter(self.bench_net_latencies)
+                        tot_jitter = self._calc_jitter(self.bench_tot_latencies)
+                        
+                        mbps = (self.bench_bytes_received / (1024 * 1024)) / dur_actual
+                        fps = len(self.bench_tot_latencies) / dur_actual
+                        loss_rate = (self.bench_skipped_frames / (len(self.bench_tot_latencies) + self.bench_skipped_frames)) * 100
                         
                         summary = (
-                            f"\n=== BENCHMARK RESULTS ({len(self.bench_tot_latencies)} Frames Recorded) ===\n"
-                            f" ├── Stream Start        : SOF Optical Time @ {first_sensor_time} -> Recv Time @ {first_recv_time}\n"
-                            f" ├── Avg HW Scan & AI    : {avg_hw:.3f} ms (Optical sweep + FPGA + Core Processing)\n"
-                            f" ├── Avg Net Transit     : {avg_net:.3f} ms (Empirical via TCP port 50051 probe)\n"
-                            f" ├── Total System Latency: {avg_tot:.3f} ms (Max: {max_tot:.3f} ms)\n"
-                            f" └── Points Avg / Frame  : {sum(self.bench_points_count)/len(self.bench_points_count):.0f} points\n"
-                            f"========================================================="
+                            f"\n=== ADVANCED 3D POINT CLOUD TELEMETRY ({len(self.bench_tot_latencies)} Frames over {dur_actual}s) ===\n"
+                            f" ├── Stream Start        : Optical @ {first_sensor_time} -> Recv @ {first_recv_time}\n"
+                            f" ├── Avg HW Scan & AI    : {avg_hw:.3f} ms\n"
+                            f" ├── Jitter (HW Compute Standard Deviation σ)         : ±{hw_jitter:.3f} ms\n"
+                            f" ├── Jitter (Net Wire Transit Standard Deviation σ)   : ±{net_jitter:.3f} ms\n"
+                            f" ├── Jitter (Total System Turnaround Std Dev σ)       : ±{tot_jitter:.3f} ms\n"
+                            f" ├── Throughput (Raw 3D Binary Bandwidth & Render Rate): {mbps:.2f} MB/s ({fps:.1f} FPS | {sum(self.bench_points_count)/len(self.bench_points_count):.0f} pts/frame)\n"
+                            f" └── Packet Loss (Skipped Optical Timestamp Gaps)     : {self.bench_skipped_frames} frames ({loss_rate:.1f}% loss)\n"
+                            f"========================================================================================"
                         )
                         self.log_message(summary)
 
@@ -204,12 +220,9 @@ class GrpcBenchmarkApp:
                 self.ax.clear()
                 self.ax.set_facecolor("#1e1e2e")
                 self.ax.tick_params(colors="white", labelsize=7)
-
                 step = max(1, len(xs) // 4000)
                 sub_x, sub_y, sub_z = xs[::step], ys[::step], zs[::step]
-
                 self.ax.scatter(sub_x, sub_y, sub_z, c=sub_y, cmap="plasma_r", s=2.5, alpha=0.75, edgecolors="none")
-
                 max_rng = max(max(sub_x)-min(sub_x), max(sub_y)-min(sub_y), max(sub_z)-min(sub_z))
                 if max_rng > 0:
                     self.ax.set_box_aspect(((max(sub_x)-min(sub_x))/max_rng, (max(sub_y)-min(sub_y))/max_rng, (max(sub_z)-min(sub_z))/max_rng))
