@@ -22,7 +22,7 @@ PROBE_PORT = 50051  # Target the Blickfeld gRPC service socket directly
 class GrpcBenchmarkApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: gRPC Raw Benchmark (Empirical TCP Probe + Advanced Telemetry)")
+        self.root.title("Blickfeld: gRPC Raw Benchmark (Advanced Telemetry)")
         self.root.geometry("1100x600")
         self.root.configure(bg="#1e1e2e")
 
@@ -181,6 +181,12 @@ class GrpcBenchmarkApp:
                         if self.last_sensor_epoch > 0 and (pc_sensor_epoch - self.last_sensor_epoch) > 0.180:
                             self.bench_skipped_frames += 1
                         self.last_sensor_epoch = pc_sensor_epoch
+
+                        # LIVE FRAME PRINT OUT
+                        sense_str = datetime.fromtimestamp(pc_sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
+                        recv_str = datetime.fromtimestamp(pc_wire_time).strftime('%H:%M:%S.%f')[:-3]
+                        self.log_message(f"RECV | Sense: {sense_str} ➔ Recv: {recv_str} | Pts: {len(xs)} | HW: {hw_compute_ms:.1f}ms | Net: {net_ms:.1f}ms | Tot: {tot_ms:.1f}ms")
+
                 else:
                     self.bench_active = False
                     self.start_btn.configure(state="normal", text="▶ START", bg="#89b4fa")

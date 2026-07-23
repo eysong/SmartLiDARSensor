@@ -20,7 +20,7 @@ MQTT_TOPIC = "blickfeld/raw_pointcloud"
 class MqttRawBenchmarkApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("⚠️ WARNING: Raw Point Cloud via MQTT (With Jitter, Bloat & Backlog Loss)")
+        self.root.title("Blickfeld: MQTT Raw Benchmark (Advanced Telemetry)")
         self.root.geometry("1100x600")
         self.root.configure(bg="#1e1e2e")
 
@@ -78,7 +78,7 @@ class MqttRawBenchmarkApp:
         self.bench_status = tk.Label(bench_frame, text="Status: Waiting for MQTT stream...", font=("Arial", 10, "italic"), bg="#1e1e2e", fg="#a6adc8")
         self.bench_status.grid(row=1, column=0, sticky="w", padx=10, pady=2)
 
-        self.log_widget = tk.Text(bench_frame, bg="#181825", fg="#f38ba8", font=("Consolas", 10), state="disabled", wrap="word")
+        self.log_widget = tk.Text(bench_frame, bg="#181825", fg="#bac2de", font=("Consolas", 10), state="disabled", wrap="word")
         self.log_widget.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
         scroll = ttk.Scrollbar(bench_frame, orient="vertical", command=self.log_widget.yview)
         self.log_widget.configure(yscrollcommand=scroll.set)
@@ -107,14 +107,14 @@ class MqttRawBenchmarkApp:
         self.bench_bytes_received, self.bench_backlog_drops = 0, 0
         self.last_sensor_epoch = 0.0
         
-        self.start_btn.configure(state="disabled", text="⏳ RUNNING...", bg="#f38ba8")
+        self.start_btn.configure(state="disabled", text="⏳ RUNNING...", bg="#89b4fa")
         self.bench_status.configure(text=f"Status: Recording packets for {dur}s...", fg="#f9e2af")
         self.log_message(f"\n=== STARTING {dur}s ADVANCED MQTT POINT CLOUD BENCHMARK ===")
 
     def _mqtt_subscriber_thread(self):
         def on_connect(client, userdata, flags, rc, properties=None):
             if rc == 0:
-                self.packet_queue.put(("LOG", f"CONNECTED: Listening to heavy stream on '{MQTT_TOPIC}'..."))
+                self.packet_queue.put(("LOG", f"CONNECTED: Listening to stream on '{MQTT_TOPIC}'..."))
                 client.subscribe(MQTT_TOPIC)
             else: self.packet_queue.put(("LOG", f"BROKER REFUSED CONNECTION: Code {rc}"))
 
@@ -127,8 +127,8 @@ class MqttRawBenchmarkApp:
             except Exception as e: print(f"⚠️ PYTHON PARSE ERROR: {e}")
 
         try:
-            try: client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id="MQTT_Raw_Heavy")
-            except AttributeError: client = mqtt.Client(client_id="MQTT_Raw_Heavy")
+            try: client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id="MQTT_Raw_Dash")
+            except AttributeError: client = mqtt.Client(client_id="MQTT_Raw_Dash")
             client.on_connect = on_connect
             client.on_message = on_message
             client.connect(MQTT_BROKER, MQTT_PORT, 60)
@@ -145,7 +145,7 @@ class MqttRawBenchmarkApp:
             elif item[0] == "PC_DATA": latest_packet = item
 
         if queue_backlog > 5:
-            self.log_message(f"⚠️ WARNING: Broker packet backlog detected! Queue size: {queue_backlog} frames.")
+            self.log_message(f"⚠️ Broker packet backlog detected! Queue size: {queue_backlog} frames.")
             if self.bench_active and time.time() <= self.bench_end_time:
                 self.bench_backlog_drops += max(0, queue_backlog - 1)
 
@@ -162,7 +162,6 @@ class MqttRawBenchmarkApp:
                 0.0
             )
 
-            # fixed unit conversion
             sensor_epoch = 0.0
             if isinstance(raw_ts, str):
                 try:
@@ -180,7 +179,6 @@ class MqttRawBenchmarkApp:
                 except Exception:
                     pass
 
-            # updated send_epoch to use the same logic
             raw_send_ts = payload.get("send_time", 0.0)
             send_epoch = 0.0
             if raw_send_ts:
@@ -207,6 +205,12 @@ class MqttRawBenchmarkApp:
                         self.bench_tot_latencies.append(tot_ms)
                         self.bench_points_count.append(len(xs))
                         self.bench_bytes_received += byte_size
+
+                        # LIVE FRAME PRINT OUT
+                        sense_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
+                        recv_str = datetime.fromtimestamp(recv_time).strftime('%H:%M:%S.%f')[:-3]
+                        self.log_message(f"RECV | Sense: {sense_str} ➔ Recv: {recv_str} | Pts: {len(xs)} | Proc: {proc_ms:.1f}ms | Net: {net_ms:.1f}ms | Tot: {tot_ms:.1f}ms")
+
                 else:
                     self.bench_active = False
                     self.start_btn.configure(state="normal", text="▶ START BENCHMARK", bg="#89b4fa")
@@ -233,11 +237,11 @@ class MqttRawBenchmarkApp:
                         summary = (
                             f"\n=== ADVANCED MQTT POINT CLOUD TELEMETRY ({len(self.bench_tot_latencies)} Frames over {dur_actual}s) ===\n"
                             f" ├── Stream Start        : Optical @ {first_sensor} -> Recv @ {first_recv}\n"
-                            f" ├── Avg Unpacker Tax    : {avg_proc:.2f} ms\n"
-                            f" ├── Jitter (Node-RED JS Unpacker Standard Deviation σ)    : ±{proc_jitter:.2f} ms\n"
+                            f" ├── Avg Middleware Time : {avg_proc:.2f} ms\n"
+                            f" ├── Jitter (Middleware Standard Deviation σ)              : ±{proc_jitter:.2f} ms\n"
                             f" ├── Jitter (Broker Wire Transit Standard Deviation σ)     : ±{net_jitter:.2f} ms\n"
                             f" ├── Jitter (Total Pipeline Time Standard Deviation σ)     : ±{tot_jitter:.2f} ms\n"
-                            f" ├── Throughput (ASCII JSON Bloat Bandwidth & Render Rate) : {mbps:.2f} MB/s ({fps:.1f} FPS)\n"
+                            f" ├── Throughput (JSON Text Bandwidth & Render Rate)        : {mbps:.2f} MB/s ({fps:.1f} FPS)\n"
                             f" └── Packet Loss (Frames Dropped by Socket Queue Overflow) : {self.bench_backlog_drops} frames ({loss_rate:.1f}% loss)\n"
                             f"=========================================================================================="
                         )
