@@ -155,10 +155,10 @@ class MqttRawBenchmarkApp:
             self.cached_xyz = (xs, ys, zs)
 
             raw_ts = (
-                frame_data.get("timestamp") or
-                frame_data.get("frame", {}).get("timestamp") or
-                frame_data.get("objects", {}).get("timestamp") or
-                frame_data.get("objects", {}).get("metadata", {}).get("timestamp") or
+                payload.get("timestamp") or
+                payload.get("frame", {}).get("timestamp") or
+                payload.get("objects", {}).get("timestamp") or
+                payload.get("objects", {}).get("metadata", {}).get("timestamp") or
                 0.0
             )
 
