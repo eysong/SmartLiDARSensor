@@ -162,6 +162,7 @@ class MqttRawBenchmarkApp:
                 0.0
             )
 
+            # fixed unit conversion
             sensor_epoch = 0.0
             if isinstance(raw_ts, str):
                 try:
@@ -169,21 +170,28 @@ class MqttRawBenchmarkApp:
                         sensor_epoch = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
                     else:
                         val = float(raw_ts)
-                        sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
+                        sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e6 if val > 1e13 else (val / 1e3 if val > 1e10 else val))
                 except Exception:
                     pass
             elif isinstance(raw_ts, (int, float)):
                 try:
                     val = float(raw_ts)
-                    sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e3 if val > 1e10 else val)
+                    sensor_epoch = val / 1e9 if val > 1e16 else (val / 1e6 if val > 1e13 else (val / 1e3 if val > 1e10 else val))
                 except Exception:
                     pass
 
+            # updated send_epoch to use the same logic
             raw_send_ts = payload.get("send_time", 0.0)
             send_epoch = 0.0
             if raw_send_ts:
-                try: send_epoch = datetime.fromisoformat(raw_send_ts.replace("Z", "+00:00")).timestamp() if isinstance(raw_send_ts, str) else (float(raw_send_ts) / 1e9 if float(raw_send_ts) > 1e16 else float(raw_send_ts))
-                except Exception: pass
+                try: 
+                    if isinstance(raw_send_ts, str) and "T" in raw_send_ts:
+                        send_epoch = datetime.fromisoformat(raw_send_ts.replace("Z", "+00:00")).timestamp()
+                    else:
+                        val = float(raw_send_ts)
+                        send_epoch = val / 1e9 if val > 1e16 else (val / 1e6 if val > 1e13 else (val / 1e3 if val > 1e10 else val))
+                except Exception: 
+                    pass
             
             if send_epoch == 0.0 and sensor_epoch > 0: send_epoch = sensor_epoch
 
