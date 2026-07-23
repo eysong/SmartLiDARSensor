@@ -273,6 +273,10 @@ class MqttDashboardApp:
                         self.tree.delete(last_item)
                         if str(last_id) in self.tree_items: del self.tree_items[str(last_id)]
 
+        if self.bench_active:
+            time_left = max(0.0, self.bench_end_time - time.time())
+            self.start_bench_btn.configure(text=f"⏳ RECORDING ({time_left:.1f}s)")
+
         self.root.after(100, self._ui_consumer_tick)
 
 if __name__ == "__main__":
