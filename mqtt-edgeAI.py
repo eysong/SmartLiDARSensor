@@ -183,16 +183,31 @@ class MqttDashboardApp:
 
         if latest_mqtt:
             _, wire_arrival_time, payload, byte_size = latest_mqtt
-            raw_ts = payload.get("timestamp") or payload.get("time") or 0.0
+            
+            # PRIORITIZE OPTICAL HARDWARE TIMESTAMP
+            raw_ts = (
+                payload.get("optical_timestamp") or
+                payload.get("timestamp") or
+                payload.get("time") or
+                0.0
+            )
+
             raw_send_ts = payload.get("send_time", 0.0)
 
             sensor_epoch = 0.0
             if isinstance(raw_ts, str):
-                try: sensor_epoch = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+                try:
+                    if "T" in raw_ts:
+                        sensor_epoch = datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp()
+                    else:
+                        val_num = float(raw_ts)
+                        sensor_epoch = val_num / 1e9 if val_num > 1e16 else (val_num / 1e6 if val_num > 1e13 else (val_num / 1e3 if val_num > 1e10 else val_num))
                 except Exception: pass
-            else:
-                try: sensor_epoch = float(raw_ts) / 1e9 if float(raw_ts) > 1e16 else (float(raw_ts) / 1e3 if float(raw_ts) > 1e10 else float(raw_ts))
-                except (ValueError, TypeError): pass
+            elif isinstance(raw_ts, (int, float)):
+                try:
+                    val_num = float(raw_ts)
+                    sensor_epoch = val_num / 1e9 if val_num > 1e16 else (val_num / 1e6 if val_num > 1e13 else (val_num / 1e3 if val_num > 1e10 else val_num))
+                except Exception: pass
 
             send_epoch = 0.0
             if raw_send_ts:
@@ -203,7 +218,9 @@ class MqttDashboardApp:
                         val_num = float(raw_send_ts)
                         send_epoch = val_num / 1e9 if val_num > 1e16 else (val_num / 1e6 if val_num > 1e13 else (val_num / 1e3 if val_num > 1e10 else val_num))
                 except Exception: pass
-            if send_epoch == 0.0 and sensor_epoch > 0: send_epoch = sensor_epoch
+            
+            if send_epoch == 0.0 and sensor_epoch > 0: 
+                send_epoch = sensor_epoch
 
             proc_ms = abs(send_epoch - sensor_epoch) * 1000
             net_ms = abs(wire_arrival_time - send_epoch) * 1000
@@ -268,7 +285,6 @@ class MqttDashboardApp:
                         self.tree.delete(last_item)
                         if str(last_id) in self.tree_items: del self.tree_items[str(last_id)]
 
-        # --- TIMER DECOUPLED FROM PACKET STREAM ---
         if self.bench_active:
             now_time = time.time()
             if now_time <= self.bench_end_time:
