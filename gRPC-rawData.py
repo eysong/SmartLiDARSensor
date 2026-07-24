@@ -22,7 +22,7 @@ PROBE_PORT = 50051  # Target the Blickfeld gRPC service socket directly
 class GrpcBenchmarkApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: gRPC Raw Benchmark (Advanced Telemetry)")
+        self.root.title("gRPC Raw Data Monitor")
         self.root.geometry("1100x600")
         self.root.configure(bg="#1e1e2e")
 
@@ -39,6 +39,8 @@ class GrpcBenchmarkApp:
         self.bench_bytes_received = 0
         self.bench_skipped_frames = 0
         self.last_sensor_epoch = 0.0
+        self.bench_first_sensor = 0.0
+        self.bench_first_recv = 0.0
 
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=3)
@@ -74,10 +76,10 @@ class GrpcBenchmarkApp:
         self.dur_entry.insert(0, "10")
         self.dur_entry.pack(side=tk.LEFT, padx=5)
 
-        self.start_btn = tk.Button(ctrl_bar, text="▶ START", font=("Arial", 10, "bold"), bg="#89b4fa", fg="#11111b", command=self._start_timed_benchmark, relief="flat")
+        self.start_btn = tk.Button(ctrl_bar, text="START", font=("Arial", 10, "bold"), bg="#89b4fa", fg="#11111b", command=self._start_timed_benchmark, relief="flat")
         self.start_btn.pack(side=tk.LEFT, padx=10)
         
-        self.wire_status_lbl = tk.Label(ctrl_bar, text="📡 Wire Speed: Probing...", font=("Consolas", 9, "bold"), bg="#252538", fg="#f9e2af")
+        self.wire_status_lbl = tk.Label(ctrl_bar, text="Wire Speed: Probing...", font=("Consolas", 9, "bold"), bg="#252538", fg="#f9e2af")
         self.wire_status_lbl.pack(side=tk.RIGHT, padx=5)
 
         self.bench_status = tk.Label(bench_frame, text="Status: Ready to record network telemetry...", font=("Arial", 10, "italic"), bg="#1e1e2e", fg="#a6adc8")
@@ -108,9 +110,9 @@ class GrpcBenchmarkApp:
                 with socket.create_connection((LIDAR_IP, PROBE_PORT), timeout=1.0): pass
                 rtt_ms = (time.perf_counter() - start_t) * 1000
                 self.live_wire_latency_ms = rtt_ms / 2.0
-                self.wire_status_lbl.configure(text=f"📡 Wire Speed: {self.live_wire_latency_ms:.3f} ms", fg="#a6e3a1")
+                self.wire_status_lbl.configure(text=f"Live Wire Speed: {self.live_wire_latency_ms:.3f} ms", fg="#a6e3a1")
             except Exception:
-                self.wire_status_lbl.configure(text="📡 Wire Speed: Probe Timeout", fg="#f38ba8")
+                self.wire_status_lbl.configure(text="Wire Speed: Probe Timeout", fg="#f38ba8")
             time.sleep(1.0)
 
     def _start_timed_benchmark(self):
@@ -123,8 +125,10 @@ class GrpcBenchmarkApp:
         self.bench_hw_latencies, self.bench_net_latencies, self.bench_tot_latencies, self.bench_points_count = [], [], [], []
         self.bench_bytes_received, self.bench_skipped_frames = 0, 0
         self.last_sensor_epoch = 0.0
+        self.bench_first_sensor = 0.0
+        self.bench_first_recv = 0.0
         
-        self.start_btn.configure(state="disabled", text="⏳ RUNNING...", bg="#f38ba8")
+        self.start_btn.configure(state="disabled", text="RUNNING...", bg="#f38ba8", disabledforeground="#11111b")
         self.bench_status.configure(text=f"Status: Recording packets for {dur}s...", fg="#f9e2af")
         self.log_message(f"\n=== STARTING {dur}s ADVANCED gRPC POINT CLOUD BENCHMARK ===")
 
@@ -165,62 +169,30 @@ class GrpcBenchmarkApp:
             raw_ts = getattr(pc_frame, "timestamp", None) or 0.0
             pc_sensor_epoch = float(raw_ts) / 1e9 if float(raw_ts) > 1e16 else float(raw_ts)
 
-            if self.bench_active:
-                if time.time() <= self.bench_end_time:
-                    if pc_sensor_epoch > 0:
-                        tot_ms = abs(pc_wire_time - pc_sensor_epoch) * 1000
-                        net_ms = self.live_wire_latency_ms
-                        hw_compute_ms = max(0.0, tot_ms - net_ms)
+            if self.bench_active and time.time() <= self.bench_end_time:
+                if pc_sensor_epoch > 0:
+                    if self.bench_first_sensor == 0.0:
+                        self.bench_first_sensor = pc_sensor_epoch
+                        self.bench_first_recv = pc_wire_time
 
-                        self.bench_hw_latencies.append(hw_compute_ms)
-                        self.bench_net_latencies.append(net_ms)
-                        self.bench_tot_latencies.append(tot_ms)
-                        self.bench_points_count.append(len(xs))
-                        self.bench_bytes_received += frame_bytes
-                        
-                        if self.last_sensor_epoch > 0 and (pc_sensor_epoch - self.last_sensor_epoch) > 0.180:
-                            self.bench_skipped_frames += 1
-                        self.last_sensor_epoch = pc_sensor_epoch
+                    tot_ms = abs(pc_wire_time - pc_sensor_epoch) * 1000
+                    net_ms = self.live_wire_latency_ms
+                    hw_compute_ms = max(0.0, tot_ms - net_ms)
 
-                        # LIVE FRAME PRINT OUT
-                        sense_str = datetime.fromtimestamp(pc_sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
-                        recv_str = datetime.fromtimestamp(pc_wire_time).strftime('%H:%M:%S.%f')[:-3]
-                        self.log_message(f"RECV | Sense: {sense_str} ➔ Recv: {recv_str} | Pts: {len(xs)} | HW: {hw_compute_ms:.1f}ms | Net: {net_ms:.1f}ms | Tot: {tot_ms:.1f}ms")
+                    self.bench_hw_latencies.append(hw_compute_ms)
+                    self.bench_net_latencies.append(net_ms)
+                    self.bench_tot_latencies.append(tot_ms)
+                    self.bench_points_count.append(len(xs))
+                    self.bench_bytes_received += frame_bytes
+                    
+                    if self.last_sensor_epoch > 0 and (pc_sensor_epoch - self.last_sensor_epoch) > 0.180:
+                        self.bench_skipped_frames += 1
+                    self.last_sensor_epoch = pc_sensor_epoch
 
-                else:
-                    self.bench_active = False
-                    self.start_btn.configure(state="normal", text="▶ START", bg="#89b4fa")
-                    self.bench_status.configure(text="Status: Benchmark complete!", fg="#a6e3a1")
-
-                    if len(self.bench_tot_latencies) > 0:
-                        dur_actual = float(self.dur_entry.get())
-                        first_sensor_time = datetime.fromtimestamp(pc_sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
-                        first_recv_time = datetime.fromtimestamp(pc_wire_time).strftime('%H:%M:%S.%f')[:-3]
-                        
-                        avg_hw = sum(self.bench_hw_latencies) / len(self.bench_hw_latencies)
-                        avg_net = sum(self.bench_net_latencies) / len(self.bench_net_latencies)
-                        avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
-                        
-                        hw_jitter = self._calc_jitter(self.bench_hw_latencies)
-                        net_jitter = self._calc_jitter(self.bench_net_latencies)
-                        tot_jitter = self._calc_jitter(self.bench_tot_latencies)
-                        
-                        mbps = (self.bench_bytes_received / (1024 * 1024)) / dur_actual
-                        fps = len(self.bench_tot_latencies) / dur_actual
-                        loss_rate = (self.bench_skipped_frames / (len(self.bench_tot_latencies) + self.bench_skipped_frames)) * 100
-                        
-                        summary = (
-                            f"\n=== ADVANCED 3D POINT CLOUD TELEMETRY ({len(self.bench_tot_latencies)} Frames over {dur_actual}s) ===\n"
-                            f" ├── Stream Start        : Optical @ {first_sensor_time} -> Recv @ {first_recv_time}\n"
-                            f" ├── Avg HW Scan & AI    : {avg_hw:.3f} ms\n"
-                            f" ├── Jitter (HW Compute Standard Deviation σ)         : ±{hw_jitter:.3f} ms\n"
-                            f" ├── Jitter (Net Wire Transit Standard Deviation σ)   : ±{net_jitter:.3f} ms\n"
-                            f" ├── Jitter (Total System Turnaround Std Dev σ)       : ±{tot_jitter:.3f} ms\n"
-                            f" ├── Throughput (Raw 3D Binary Bandwidth & Render Rate): {mbps:.2f} MB/s ({fps:.1f} FPS | {sum(self.bench_points_count)/len(self.bench_points_count):.0f} pts/frame)\n"
-                            f" └── Packet Loss (Skipped Optical Timestamp Gaps)     : {self.bench_skipped_frames} frames ({loss_rate:.1f}% loss)\n"
-                            f"========================================================================================"
-                        )
-                        self.log_message(summary)
+                    # LIVE FRAME PRINT OUT
+                    sense_str = datetime.fromtimestamp(pc_sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
+                    recv_str = datetime.fromtimestamp(pc_wire_time).strftime('%H:%M:%S.%f')[:-3]
+                    self.log_message(f"RECV | Sense: {sense_str} -> Recv: {recv_str} | Pts: {len(xs)} | Sensing: {hw_compute_ms:.1f}ms | Net: {net_ms:.1f}ms | Tot: {tot_ms:.1f}ms")
 
             if len(xs) > 0:
                 self.ax.clear()
@@ -235,9 +207,45 @@ class GrpcBenchmarkApp:
                 self.ax.view_init(elev=22, azim=-45)
                 self.canvas.draw_idle()
 
+        # --- TIMER DECOUPLED FROM PACKET STREAM ---
         if self.bench_active:
-            time_left = max(0.0, self.bench_end_time - time.time())
-            self.start_btn.configure(text=f"⏳ RUNNING ({time_left:.1f}s)")
+            now_time = time.time()
+            if now_time <= self.bench_end_time:
+                time_left = max(0.0, self.bench_end_time - now_time)
+                self.start_btn.configure(text=f"RUNNING ({time_left:.1f}s)")
+            else:
+                self.bench_active = False
+                self.start_btn.configure(state="normal", text="START", bg="#89b4fa", fg="#11111b")
+                self.bench_status.configure(text="Status: Benchmark complete!", fg="#a6e3a1")
+
+                if len(self.bench_tot_latencies) > 0:
+                    dur_actual = float(self.dur_entry.get())
+                    first_sensor_time = datetime.fromtimestamp(self.bench_first_sensor).strftime('%H:%M:%S.%f')[:-3] if self.bench_first_sensor > 0 else "N/A"
+                    first_recv_time = datetime.fromtimestamp(self.bench_first_recv).strftime('%H:%M:%S.%f')[:-3] if self.bench_first_recv > 0 else "N/A"
+                    
+                    avg_hw = sum(self.bench_hw_latencies) / len(self.bench_hw_latencies)
+                    avg_net = sum(self.bench_net_latencies) / len(self.bench_net_latencies)
+                    avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
+                    
+                    hw_jitter = self._calc_jitter(self.bench_hw_latencies)
+                    net_jitter = self._calc_jitter(self.bench_net_latencies)
+                    tot_jitter = self._calc_jitter(self.bench_tot_latencies)
+                    
+                    mbps = (self.bench_bytes_received / (1024 * 1024)) / dur_actual
+                    fps = len(self.bench_tot_latencies) / dur_actual
+                    loss_rate = (self.bench_skipped_frames / (len(self.bench_tot_latencies) + self.bench_skipped_frames)) * 100
+                    
+                    summary = (
+                        f"\n=== ADVANCED 3D POINT CLOUD TELEMETRY ({len(self.bench_tot_latencies)} Frames over {dur_actual}s) ===\n"
+                        f" ├── Stream Start        : Optical @ {first_sensor_time} -> Recv @ {first_recv_time}\n"
+                        f" ├── Avg Sensing Latency (HW Scan)     : {avg_hw:.3f} ms (Jitter σ: ±{hw_jitter:.3f} ms)\n"
+                        f" ├── Avg Network Latency (Wire Speed)   : {avg_net:.3f} ms (Jitter σ: ±{net_jitter:.3f} ms)\n"
+                        f" ├── Avg Total End-to-End Latency      : {avg_tot:.3f} ms (Jitter σ: ±{tot_jitter:.3f} ms)\n"
+                        f" ├── Throughput (Raw 3D Binary)        : {mbps:.2f} MB/s ({fps:.1f} FPS | {sum(self.bench_points_count)/len(self.bench_points_count):.0f} pts/frame)\n"
+                        f" └── Packet Loss (Skipped Optical Gaps) : {self.bench_skipped_frames} frames ({loss_rate:.1f}% loss)\n"
+                        f"========================================================================================"
+                    )
+                    self.log_message(summary)
 
         self.root.after(100, self._ui_consumer_tick)
 

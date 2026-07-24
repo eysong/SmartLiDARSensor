@@ -20,7 +20,7 @@ MQTT_TOPIC = "blickfeld/raw_pointcloud"
 class MqttRawBenchmarkApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: MQTT Raw Benchmark (Advanced Telemetry)")
+        self.root.title("MQTT Raw Data Monitor")
         self.root.geometry("1100x600")
         self.root.configure(bg="#1e1e2e")
 
@@ -39,6 +39,8 @@ class MqttRawBenchmarkApp:
         self.bench_bytes_received = 0
         self.bench_backlog_drops = 0
         self.last_sensor_epoch = 0.0
+        self.bench_first_sensor = 0.0
+        self.bench_first_recv = 0.0
 
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=3)
@@ -72,7 +74,7 @@ class MqttRawBenchmarkApp:
         self.dur_entry.insert(0, "10")
         self.dur_entry.pack(side=tk.LEFT, padx=5)
 
-        self.start_btn = tk.Button(ctrl_bar, text="▶ START BENCHMARK", font=("Arial", 10, "bold"), bg="#89b4fa", fg="#11111b", command=self._start_timed_benchmark, relief="flat")
+        self.start_btn = tk.Button(ctrl_bar, text="START BENCHMARK", font=("Arial", 10, "bold"), bg="#89b4fa", fg="#11111b", command=self._start_timed_benchmark, relief="flat")
         self.start_btn.pack(side=tk.RIGHT, padx=5)
 
         self.bench_status = tk.Label(bench_frame, text="Status: Waiting for MQTT stream...", font=("Arial", 10, "italic"), bg="#1e1e2e", fg="#a6adc8")
@@ -106,8 +108,10 @@ class MqttRawBenchmarkApp:
         self.bench_proc_latencies, self.bench_net_latencies, self.bench_tot_latencies, self.bench_points_count = [], [], [], []
         self.bench_bytes_received, self.bench_backlog_drops = 0, 0
         self.last_sensor_epoch = 0.0
+        self.bench_first_sensor = 0.0
+        self.bench_first_recv = 0.0
         
-        self.start_btn.configure(state="disabled", text="⏳ RUNNING...", bg="#89b4fa")
+        self.start_btn.configure(state="disabled", text="RUNNING...", bg="#f38ba8", disabledforeground="#11111b")
         self.bench_status.configure(text=f"Status: Recording packets for {dur}s...", fg="#f9e2af")
         self.log_message(f"\n=== STARTING {dur}s ADVANCED MQTT POINT CLOUD BENCHMARK ===")
 
@@ -124,7 +128,7 @@ class MqttRawBenchmarkApp:
                 byte_size = len(msg.payload)
                 payload = json.loads(msg.payload.decode("utf-8"))
                 self.packet_queue.put(("PC_DATA", t_recv, payload, byte_size))
-            except Exception as e: print(f"⚠️ PYTHON PARSE ERROR: {e}")
+            except Exception as e: print(f"PYTHON PARSE ERROR: {e}")
 
         try:
             try: client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id="MQTT_Raw_Dash")
@@ -145,7 +149,7 @@ class MqttRawBenchmarkApp:
             elif item[0] == "PC_DATA": latest_packet = item
 
         if queue_backlog > 5:
-            self.log_message(f"⚠️ Broker packet backlog detected! Queue size: {queue_backlog} frames.")
+            self.log_message(f"Broker packet backlog detected! Queue size: {queue_backlog} frames.")
             if self.bench_active and time.time() <= self.bench_end_time:
                 self.bench_backlog_drops += max(0, queue_backlog - 1)
 
@@ -193,59 +197,26 @@ class MqttRawBenchmarkApp:
             
             if send_epoch == 0.0 and sensor_epoch > 0: send_epoch = sensor_epoch
 
-            if self.bench_active:
-                if time.time() <= self.bench_end_time:
-                    if sensor_epoch > 0:
-                        proc_ms = abs(send_epoch - sensor_epoch) * 1000
-                        net_ms = abs(recv_time - send_epoch) * 1000
-                        tot_ms = abs(recv_time - sensor_epoch) * 1000
+            if self.bench_active and time.time() <= self.bench_end_time:
+                if sensor_epoch > 0:
+                    if self.bench_first_sensor == 0.0:
+                        self.bench_first_sensor = sensor_epoch
+                        self.bench_first_recv = recv_time
 
-                        self.bench_proc_latencies.append(proc_ms)
-                        self.bench_net_latencies.append(net_ms)
-                        self.bench_tot_latencies.append(tot_ms)
-                        self.bench_points_count.append(len(xs))
-                        self.bench_bytes_received += byte_size
+                    proc_ms = abs(send_epoch - sensor_epoch) * 1000
+                    net_ms = abs(recv_time - send_epoch) * 1000
+                    tot_ms = abs(recv_time - sensor_epoch) * 1000
 
-                        # LIVE FRAME PRINT OUT
-                        sense_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
-                        recv_str = datetime.fromtimestamp(recv_time).strftime('%H:%M:%S.%f')[:-3]
-                        self.log_message(f"RECV | Sense: {sense_str} ➔ Recv: {recv_str} | Pts: {len(xs)} | Proc: {proc_ms:.1f}ms | Net: {net_ms:.1f}ms | Tot: {tot_ms:.1f}ms")
+                    self.bench_proc_latencies.append(proc_ms)
+                    self.bench_net_latencies.append(net_ms)
+                    self.bench_tot_latencies.append(tot_ms)
+                    self.bench_points_count.append(len(xs))
+                    self.bench_bytes_received += byte_size
 
-                else:
-                    self.bench_active = False
-                    self.start_btn.configure(state="normal", text="▶ START BENCHMARK", bg="#89b4fa")
-                    self.bench_status.configure(text="Status: Benchmark complete!", fg="#a6e3a1")
-
-                    if len(self.bench_tot_latencies) > 0:
-                        dur_actual = float(self.dur_entry.get())
-                        first_sensor = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
-                        first_recv = datetime.fromtimestamp(recv_time).strftime('%H:%M:%S.%f')[:-3]
-                        
-                        avg_proc = sum(self.bench_proc_latencies) / len(self.bench_proc_latencies)
-                        avg_net = sum(self.bench_net_latencies) / len(self.bench_net_latencies)
-                        avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
-                        
-                        proc_jitter = self._calc_jitter(self.bench_proc_latencies)
-                        net_jitter = self._calc_jitter(self.bench_net_latencies)
-                        tot_jitter = self._calc_jitter(self.bench_tot_latencies)
-                        
-                        mbps = (self.bench_bytes_received / (1024 * 1024)) / dur_actual
-                        fps = len(self.bench_tot_latencies) / dur_actual
-                        tot_frames = len(self.bench_tot_latencies) + self.bench_backlog_drops
-                        loss_rate = (self.bench_backlog_drops / tot_frames) * 100 if tot_frames > 0 else 0
-                        
-                        summary = (
-                            f"\n=== ADVANCED MQTT POINT CLOUD TELEMETRY ({len(self.bench_tot_latencies)} Frames over {dur_actual}s) ===\n"
-                            f" ├── Stream Start        : Optical @ {first_sensor} -> Recv @ {first_recv}\n"
-                            f" ├── Avg Middleware Time : {avg_proc:.2f} ms\n"
-                            f" ├── Jitter (Middleware Standard Deviation σ)              : ±{proc_jitter:.2f} ms\n"
-                            f" ├── Jitter (Broker Wire Transit Standard Deviation σ)     : ±{net_jitter:.2f} ms\n"
-                            f" ├── Jitter (Total Pipeline Time Standard Deviation σ)     : ±{tot_jitter:.2f} ms\n"
-                            f" ├── Throughput (JSON Text Bandwidth & Render Rate)        : {mbps:.2f} MB/s ({fps:.1f} FPS)\n"
-                            f" └── Packet Loss (Frames Dropped by Socket Queue Overflow) : {self.bench_backlog_drops} frames ({loss_rate:.1f}% loss)\n"
-                            f"=========================================================================================="
-                        )
-                        self.log_message(summary)
+                    # LIVE FRAME PRINT OUT
+                    sense_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3]
+                    recv_str = datetime.fromtimestamp(recv_time).strftime('%H:%M:%S.%f')[:-3]
+                    self.log_message(f"RECV | Sense: {sense_str} -> Recv: {recv_str} | Pts: {len(xs)} | Proc: {proc_ms:.1f}ms | Net: {net_ms:.1f}ms | Tot: {tot_ms:.1f}ms")
 
             now = time.time()
             if (now - self.last_ui_paint) >= 0.4 and len(xs) > 0:
@@ -260,9 +231,46 @@ class MqttRawBenchmarkApp:
                 self.ax.set_title(f"MQTT Pipe: Rendering {len(sub_x)} of {len(xs)} points", color="white", fontsize=9)
                 self.canvas.draw_idle()
 
+        # --- TIMER DECOUPLED FROM PACKET STREAM ---
         if self.bench_active:
-            time_left = max(0.0, self.bench_end_time - time.time())
-            self.start_btn.configure(text=f"⏳ RUNNING ({time_left:.1f}s)")
+            now_time = time.time()
+            if now_time <= self.bench_end_time:
+                time_left = max(0.0, self.bench_end_time - now_time)
+                self.start_btn.configure(text=f"RUNNING ({time_left:.1f}s)")
+            else:
+                self.bench_active = False
+                self.start_btn.configure(state="normal", text="START BENCHMARK", bg="#89b4fa", fg="#11111b")
+                self.bench_status.configure(text="Status: Benchmark complete!", fg="#a6e3a1")
+
+                if len(self.bench_tot_latencies) > 0:
+                    dur_actual = float(self.dur_entry.get())
+                    first_sensor = datetime.fromtimestamp(self.bench_first_sensor).strftime('%H:%M:%S.%f')[:-3] if self.bench_first_sensor > 0 else "N/A"
+                    first_recv = datetime.fromtimestamp(self.bench_first_recv).strftime('%H:%M:%S.%f')[:-3] if self.bench_first_recv > 0 else "N/A"
+                    
+                    avg_proc = sum(self.bench_proc_latencies) / len(self.bench_proc_latencies)
+                    avg_net = sum(self.bench_net_latencies) / len(self.bench_net_latencies)
+                    avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
+                    
+                    proc_jitter = self._calc_jitter(self.bench_proc_latencies)
+                    net_jitter = self._calc_jitter(self.bench_net_latencies)
+                    tot_jitter = self._calc_jitter(self.bench_tot_latencies)
+                    
+                    mbps = (self.bench_bytes_received / (1024 * 1024)) / dur_actual
+                    fps = len(self.bench_tot_latencies) / dur_actual
+                    tot_frames = len(self.bench_tot_latencies) + self.bench_backlog_drops
+                    loss_rate = (self.bench_backlog_drops / tot_frames) * 100 if tot_frames > 0 else 0
+                    
+                    summary = (
+                        f"\n=== ADVANCED MQTT POINT CLOUD TELEMETRY ({len(self.bench_tot_latencies)} Frames over {dur_actual}s) ===\n"
+                        f" ├── Stream Start        : Optical @ {first_sensor} -> Recv @ {first_recv}\n"
+                        f" ├── Avg Sensing / Middleware Latency : {avg_proc:.2f} ms (Jitter σ: ±{proc_jitter:.2f} ms)\n"
+                        f" ├── Avg Network Wire Transit Latency  : {avg_net:.2f} ms (Jitter σ: ±{net_jitter:.2f} ms)\n"
+                        f" ├── Avg Total End-to-End Latency      : {avg_tot:.2f} ms (Jitter σ: ±{tot_jitter:.2f} ms)\n"
+                        f" ├── Throughput (JSON Text Bandwidth)  : {mbps:.2f} MB/s ({fps:.1f} FPS)\n"
+                        f" └── Packet Loss (Socket Queue Overflow): {self.bench_backlog_drops} frames ({loss_rate:.1f}% loss)\n"
+                        f"=========================================================================================="
+                    )
+                    self.log_message(summary)
 
         self.root.after(100, self._ui_consumer_tick)
 

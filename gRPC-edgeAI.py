@@ -24,7 +24,7 @@ PROBE_PORT = 50051  # Probes the sensor's hardware gRPC port for clean wire RTT
 class GrpcTrueWireDashboard:
     def __init__(self, root):
         self.root = root
-        self.root.title("Blickfeld: gRPC Edge-AI Monitor (Empirical TCP Probe + Advanced Telemetry)")
+        self.root.title("gRPC Edge AI Monitor")
         self.root.geometry("980x650")
         self.root.configure(bg="#1e1e2e")
 
@@ -42,8 +42,9 @@ class GrpcTrueWireDashboard:
         # --- ADVANCED BENCHMARKING STATE ---
         self.bench_active = False
         self.bench_end_time = 0.0
-        self.bench_tot_latencies = []
+        self.bench_hw_latencies = []
         self.bench_net_latencies = []
+        self.bench_tot_latencies = []
         self.bench_bytes_received = 0
         self.bench_frame_count = 0
         self.bench_skipped_frames = 0
@@ -69,19 +70,19 @@ class GrpcTrueWireDashboard:
         ctrl_frame = tk.Frame(self.root, bg="#252538", pady=8, padx=15)
         ctrl_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=(10, 0))
         
-        tk.Label(ctrl_frame, text="⏱ Dur (s):", font=("Arial", 10, "bold"), bg="#252538", fg="white").pack(side=tk.LEFT, padx=2)
+        tk.Label(ctrl_frame, text="Dur (s):", font=("Arial", 10, "bold"), bg="#252538", fg="white").pack(side=tk.LEFT, padx=2)
         self.dur_entry = tk.Entry(ctrl_frame, width=4, font=("Consolas", 11, "bold"), bg="#181825", fg="#89b4fa", insertbackground="white")
         self.dur_entry.insert(0, "10")
         self.dur_entry.pack(side=tk.LEFT, padx=2)
 
-        self.start_bench_btn = tk.Button(ctrl_frame, text="▶ START BENCHMARK", font=("Arial", 10, "bold"), bg="#89b4fa", fg="#11111b", command=self._start_timed_benchmark, relief="flat")
+        self.start_bench_btn = tk.Button(ctrl_frame, text="START BENCHMARK", font=("Arial", 10, "bold"), bg="#89b4fa", fg="#11111b", command=self._start_timed_benchmark, relief="flat")
         self.start_bench_btn.pack(side=tk.LEFT, padx=10)
 
-        tk.Label(ctrl_frame, text="⚙️ Client Rate Limit (FPS):", font=("Arial", 10, "bold"), bg="#252538", fg="white").pack(side=tk.LEFT, padx=(10, 2))
+        tk.Label(ctrl_frame, text="Client Rate Limit (FPS):", font=("Arial", 10, "bold"), bg="#252538", fg="white").pack(side=tk.LEFT, padx=(10, 2))
         self.fps_entry = tk.Entry(ctrl_frame, width=5, font=("Consolas", 11, "bold"), bg="#181825", fg="#89b4fa", insertbackground="white")
         self.fps_entry.pack(side=tk.LEFT, padx=5)
         
-        self.wire_status_lbl = tk.Label(ctrl_frame, text="📡 Wire Speed: Probing...", font=("Consolas", 10, "bold"), bg="#252538", fg="#f9e2af")
+        self.wire_status_lbl = tk.Label(ctrl_frame, text="Wire Speed: Probing...", font=("Consolas", 10, "bold"), bg="#252538", fg="#f9e2af")
         self.wire_status_lbl.pack(side=tk.RIGHT, padx=10)
 
         self.status_frame = tk.Frame(self.root, bg="#a6e3a1", height=60)
@@ -134,11 +135,11 @@ class GrpcTrueWireDashboard:
 
         self.bench_active = True
         self.bench_end_time = time.time() + dur
-        self.bench_tot_latencies, self.bench_net_latencies = [], []
+        self.bench_hw_latencies, self.bench_net_latencies, self.bench_tot_latencies = [], [], []
         self.bench_bytes_received, self.bench_frame_count, self.bench_skipped_frames = 0, 0, 0
         self.last_sensor_epoch = 0.0
         
-        self.start_bench_btn.configure(state="disabled", text="⏳ RECORDING...", bg="#f38ba8")
+        self.start_bench_btn.configure(state="disabled", text="RECORDING...", bg="#f38ba8", disabledforeground="#11111b")
         self.log_message(f"\n=== STARTING {dur}s ADVANCED gRPC EDGE-AI BENCHMARK ===")
 
     def _calc_jitter(self, latencies):
@@ -154,9 +155,9 @@ class GrpcTrueWireDashboard:
                 with socket.create_connection((LIDAR_IP, PROBE_PORT), timeout=1.0): pass
                 rtt_ms = (time.perf_counter() - start_t) * 1000
                 self.live_wire_latency_ms = rtt_ms / 2.0
-                self.wire_status_lbl.configure(text=f"📡 Live Wire Speed: {self.live_wire_latency_ms:.3f} ms", fg="#a6e3a1")
+                self.wire_status_lbl.configure(text=f"Live Wire Speed: {self.live_wire_latency_ms:.3f} ms", fg="#a6e3a1")
             except Exception:
-                self.wire_status_lbl.configure(text="📡 Wire Speed: Probe Timeout", fg="#f38ba8")
+                self.wire_status_lbl.configure(text="Wire Speed: Probe Timeout", fg="#f38ba8")
             time.sleep(1.0)
 
     def _grpc_objects_producer(self):
@@ -207,48 +208,27 @@ class GrpcTrueWireDashboard:
             elif isinstance(raw_ts, (int, float)):
                 sensor_epoch = raw_ts / 1e9 if raw_ts > 1e16 else (raw_ts / 1e3 if raw_ts > 1e10 else raw_ts)
 
-            # --- ADVANCED BENCHMARK RECORDING ---
-            if self.bench_active:
-                if now <= self.bench_end_time:
-                    if sensor_epoch > 0:
-                        tot_ms = abs(wire_arrival_time - sensor_epoch) * 1000
-                        self.bench_tot_latencies.append(tot_ms)
-                        self.bench_net_latencies.append(self.live_wire_latency_ms)
-                        self.bench_bytes_received += byte_size
-                        self.bench_frame_count += 1
-                        
-                        if self.last_sensor_epoch > 0 and (sensor_epoch - self.last_sensor_epoch) > 0.180:
-                            self.bench_skipped_frames += 1
-                        self.last_sensor_epoch = sensor_epoch
-                else:
-                    self.bench_active = False
-                    self.start_bench_btn.configure(state="normal", text="▶ START BENCHMARK", bg="#89b4fa")
-                    dur_actual = float(self.dur_entry.get())
-                    
-                    if len(self.bench_tot_latencies) > 0:
-                        avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
-                        tot_jitter = self._calc_jitter(self.bench_tot_latencies)
-                        net_jitter = self._calc_jitter(self.bench_net_latencies)
-                        fps = self.bench_frame_count / dur_actual
-                        kbps = (self.bench_bytes_received / 1024) / dur_actual
-                        loss_rate = (self.bench_skipped_frames / (self.bench_frame_count + self.bench_skipped_frames)) * 100
+            if self.bench_active and now <= self.bench_end_time:
+                if sensor_epoch > 0:
+                    tot_ms = abs(wire_arrival_time - sensor_epoch) * 1000
+                    net_ms = self.live_wire_latency_ms
+                    hw_compute_ms = max(0.0, tot_ms - net_ms)
 
-                        summary = (
-                            f"\n=== ADVANCED gRPC AI TELEMETRY ({self.bench_frame_count} Frames over {dur_actual}s) ===\n"
-                            f" ├── Avg Total Latency : {avg_tot:.3f} ms\n"
-                            f" ├── Jitter (Total System Turnaround Standard Deviation σ) : ±{tot_jitter:.3f} ms\n"
-                            f" ├── Jitter (Ethernet Wire Transit Standard Deviation σ)   : ±{net_jitter:.3f} ms\n"
-                            f" ├── Throughput (Protobuf Binary Bandwidth & Render Rate)  : {kbps:.2f} KB/s ({fps:.1f} FPS)\n"
-                            f" └── Packet Loss (Skipped Optical Timestamp Gaps >180ms)   : {self.bench_skipped_frames} frames ({loss_rate:.1f}% loss)\n"
-                            f"========================================================================================"
-                        )
-                        self.log_message(summary)
+                    self.bench_hw_latencies.append(hw_compute_ms)
+                    self.bench_net_latencies.append(net_ms)
+                    self.bench_tot_latencies.append(tot_ms)
+                    self.bench_bytes_received += byte_size
+                    self.bench_frame_count += 1
+                    
+                    if self.last_sensor_epoch > 0 and (sensor_epoch - self.last_sensor_epoch) > 0.180:
+                        self.bench_skipped_frames += 1
+                    self.last_sensor_epoch = sensor_epoch
 
             if sensor_epoch > 0:
                 total_ms = abs(wire_arrival_time - sensor_epoch) * 1000
                 net_ms = self.live_wire_latency_ms
                 hw_compute_ms = max(0.0, total_ms - net_ms)
-                lat_str = f"HW/AI: {hw_compute_ms:.2f}ms | Net: {net_ms:.3f}ms | Total: {total_ms:.2f}ms"
+                lat_str = f"Sensing: {hw_compute_ms:.2f}ms | Net: {net_ms:.3f}ms | Total: {total_ms:.2f}ms"
             else: lat_str = "UNKNOWN"
                 
             raw_objs = frame_data.get("objects", {})
@@ -279,7 +259,7 @@ class GrpcTrueWireDashboard:
                     sense_str = datetime.fromtimestamp(sensor_epoch).strftime('%H:%M:%S.%f')[:-3] if sensor_epoch > 0 else "N/A"
                     recv_str = datetime.fromtimestamp(wire_arrival_time).strftime('%H:%M:%S.%f')[:-3]
                     obj_ids = ", ".join([str(subj["objectID"]) for subj in incoming_intrusions])
-                    self.log_message(f"SDSM INTRUSION | IDs: {obj_ids} | Sense: {sense_str} ➔ Recv: {recv_str} | {lat_str}")
+                    self.log_message(f"SDSM INTRUSION | IDs: {obj_ids} | Sense: {sense_str} -> Recv: {recv_str} | {lat_str}")
 
         is_alarm = now < self.alarm_active_until
         if (now - self.last_ui_paint) >= UI_REFRESH_RATE_SEC:
@@ -303,8 +283,38 @@ class GrpcTrueWireDashboard:
                         if str(last_id) in self.tree_items: del self.tree_items[str(last_id)]
 
         if self.bench_active:
-            time_left = max(0.0, self.bench_end_time - time.time())
-            self.start_bench_btn.configure(text=f"⏳ RECORDING ({time_left:.1f}s)")
+            now_time = time.time()
+            if now_time <= self.bench_end_time:
+                time_left = max(0.0, self.bench_end_time - now_time)
+                self.start_bench_btn.configure(text=f"RECORDING ({time_left:.1f}s)")
+            else:
+                self.bench_active = False
+                self.start_bench_btn.configure(state="normal", text="START BENCHMARK", bg="#89b4fa", fg="#11111b")
+                dur_actual = float(self.dur_entry.get())
+                
+                if len(self.bench_tot_latencies) > 0:
+                    avg_hw = sum(self.bench_hw_latencies) / len(self.bench_hw_latencies)
+                    avg_net = sum(self.bench_net_latencies) / len(self.bench_net_latencies)
+                    avg_tot = sum(self.bench_tot_latencies) / len(self.bench_tot_latencies)
+                    
+                    hw_jitter = self._calc_jitter(self.bench_hw_latencies)
+                    net_jitter = self._calc_jitter(self.bench_net_latencies)
+                    tot_jitter = self._calc_jitter(self.bench_tot_latencies)
+
+                    fps = self.bench_frame_count / dur_actual
+                    kbps = (self.bench_bytes_received / 1024) / dur_actual
+                    loss_rate = (self.bench_skipped_frames / (self.bench_frame_count + self.bench_skipped_frames)) * 100
+
+                    summary = (
+                        f"\n=== ADVANCED gRPC AI TELEMETRY ({self.bench_frame_count} Frames over {dur_actual}s) ===\n"
+                        f" ├── Avg Sensing Latency (HW Scan & AI) : {avg_hw:.3f} ms (Jitter σ: ±{hw_jitter:.3f} ms)\n"
+                        f" ├── Avg Network Latency (Wire Speed)   : {avg_net:.3f} ms (Jitter σ: ±{net_jitter:.3f} ms)\n"
+                        f" ├── Avg Total End-to-End Latency      : {avg_tot:.3f} ms (Jitter σ: ±{tot_jitter:.3f} ms)\n"
+                        f" ├── Throughput (Protobuf Binary)       : {kbps:.2f} KB/s ({fps:.1f} FPS)\n"
+                        f" └── Packet Loss (Skipped Optical Gaps) : {self.bench_skipped_frames} frames ({loss_rate:.1f}% loss)\n"
+                        f"========================================================================================"
+                    )
+                    self.log_message(summary)
 
         self.root.after(100, self._ui_consumer_tick)
 
