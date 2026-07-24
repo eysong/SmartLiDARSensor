@@ -159,6 +159,7 @@ class MqttRawBenchmarkApp:
             self.cached_xyz = (xs, ys, zs)
 
             raw_ts = (
+                payload.get("optical_timestamp") or
                 payload.get("timestamp") or
                 payload.get("frame", {}).get("timestamp") or
                 payload.get("objects", {}).get("timestamp") or
